@@ -75,6 +75,25 @@ export interface SkillFilterConfig {
    * - `false`：完全跳过文件加载（仅使用内联 options）
    */
   configPath?: string | false
+
+  /**
+   * 是否把 `remove` 规则自动同步为 OpenCode 内核级 Policy（默认 `true`）。
+   *
+   * 内核的 `ConfigPolicyPlugin` 在所有插件之后运行，会依据
+   * `experimental.policies` 里的 deny policy 把命中的 skill 物理拔除。
+   * 开启后插件会把 `remove` 规则写成 `integration.use` 的 deny policy
+   * （resource 形如 `skill:paseo*`），使兼容层注入的技能在**下一次启动**
+   * 也被内核直接剔除。仅当存在 `remove` 规则时才会写入。
+   */
+  syncPolicy?: boolean
+
+  /**
+   * 显式指定 policy 写入的目标配置文件（如 `~/.config/opencode/opencode.jsonc`）。
+   *
+   * 缺省时按顺序查找全局 `opencode.jsonc` → `opencode.json`；两者都不存在
+   * 则跳过同步（不会主动创建用户主配置文件，除非显式指定此路径）。
+   */
+  syncPolicyPath?: string
 }
 
 /** 高级过滤规则 */
@@ -101,4 +120,16 @@ export interface NormalizedRules {
   include: string[]
   /** 排除项：命中的 skill 完全不处理。 */
   exclude: string[]
+}
+
+/**
+ * OpenCode 内核级 Policy 条目。
+ *
+ * 与内置的 `ConfigPolicy.Info` 结构完全一致（action/resource/effect 三字段）。
+ * 插件只生成 `integration.use` + `skill:<pattern>` + `deny` 这一种组合。
+ */
+export interface PolicyRule {
+  action: "integration.use"
+  resource: string
+  effect: "deny"
 }

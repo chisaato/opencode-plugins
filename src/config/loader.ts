@@ -1,8 +1,8 @@
 import fs from "node:fs/promises"
-import path from "node:path"
 import {
   getDefaultConfigPath,
   getProjectConfigPaths,
+  resolveUserPath,
   type PathResolutionOptions,
 } from "../utils/paths"
 import { resolveOverrides } from "./overrides"
@@ -19,6 +19,10 @@ export interface ResolvedConfig {
   debug: boolean
   /** 是否注册 `skills_list` 工具（默认 true）。 */
   exposeTool: boolean
+  /** 是否把 remove 规则同步为内核 policy（默认 true）。 */
+  syncPolicy: boolean
+  /** 显式指定的 policy 目标配置文件（可选）。 */
+  syncPolicyPath?: string
   /** 成功读取的来源（文件路径，以及内联 options / override 的标记）。 */
   sources: string[]
 }
@@ -114,12 +118,14 @@ export async function loadConfig(options?: LoadConfigOptions): Promise<ResolvedC
     rules: toRules(merged),
     debug: merged.debug ?? true,
     exposeTool: merged.exposeTool ?? true,
+    syncPolicy: merged.syncPolicy ?? true,
+    ...(merged.syncPolicyPath !== undefined ? { syncPolicyPath: merged.syncPolicyPath } : {}),
     sources,
   }
 }
 
 async function readConfigFile(configPath: string): Promise<LoadedFile | null> {
-  const resolved = resolvePath(configPath)
+  const resolved = resolveUserPath(configPath)
   try {
     const raw = await fs.readFile(resolved, "utf-8")
     const parsed: unknown = JSON.parse(raw)
@@ -137,14 +143,4 @@ async function readConfigFile(configPath: string): Promise<LoadedFile | null> {
     }
     return null
   }
-}
-
-function resolvePath(configPath: string): string {
-  if (configPath.startsWith("~")) {
-    return path.join(
-      process.env.HOME ?? process.env.USERPROFILE ?? "",
-      configPath.slice(1),
-    )
-  }
-  return path.resolve(configPath)
 }

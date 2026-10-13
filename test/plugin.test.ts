@@ -4,6 +4,7 @@ import path from "node:path"
 import os from "node:os"
 import { Plugin } from "@opencode/plugin"
 import SkillFilterPluginDefault, { SkillFilterPlugin } from "../src/index"
+import { parseJsonc } from "../src/config/jsonc"
 import type { MutableSkill, SkillEditorLike } from "../src/filter/apply"
 
 interface CapturedCtx {
@@ -267,6 +268,122 @@ describe("plugin setup", () => {
     const captured = createMockCtx({ hide: "nope", configPath: false }, projectDir)
     await expect(SkillFilterPlugin.setup(captured.ctx)).resolves.toBeUndefined()
     expect(captured.transformCalls).toBe(0)
+  })
+})
+
+describe("kernel policy sync", () => {
+  let root: string
+  let projectDir: string
+  let home: string
+  let target: string
+  const prevHome = process.env.OPENCODE_TEST_HOME
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "skill-filter-policy-plugin-"))
+    projectDir = path.join(root, "project")
+    home = path.join(root, "home")
+    target = path.join(home, ".config", "opencode", "opencode.jsonc")
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    process.env.OPENCODE_TEST_HOME = home
+  })
+
+  afterEach(async () => {
+    if (prevHome === undefined) {
+      delete process.env.OPENCODE_TEST_HOME
+    } else {
+      process.env.OPENCODE_TEST_HOME = prevHome
+    }
+    await fs.rm(root, { recursive: true, force: true })
+  })
+
+  it("writes remove rules as deny policies by default", async () => {
+    await fs.writeFile(target, '{\n  // keep me\n  "model": "x"\n}\n')
+
+    const captured = createMockCtx({ remove: ["paseo*"], configPath: false }, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const after = await fs.readFile(target, "utf-8")
+    expect(after).toContain("// keep me")
+    const parsed = parseJsonc(after) as {
+      model: string
+      experimental: { policies: unknown[] }
+    }
+    expect(parsed.model).toBe("x")
+    expect(parsed.experimental.policies).toEqual([
+      { action: "integration.use", resource: "skill:paseo*", effect: "deny" },
+    ])
+  })
+
+  it("exposes the policy summary through skills_list", async () => {
+    await fs.writeFile(target, "{}\n")
+    const captured = createMockCtx({ remove: ["paseo*"], configPath: false }, projectDir, [
+      { id: "keep", name: "keep" },
+    ])
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const result = await captured.getTool("skills_list").execute({ status: "all" }, {})
+    expect(result.metadata.policies).toMatchObject({
+      patterns: ["paseo*"],
+      synced: true,
+      written: true,
+      path: target,
+    })
+    expect(result.content[0].text).toContain("policy: synced=true (written)")
+  })
+
+  it("does not write when syncPolicy is disabled", async () => {
+    await fs.writeFile(target, '{ "model": "x" }\n')
+    const captured = createMockCtx(
+      { remove: ["paseo*"], configPath: false, syncPolicy: false },
+      projectDir,
+    )
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    expect(await fs.readFile(target, "utf-8")).toBe('{ "model": "x" }\n')
+  })
+
+  it("honours an explicit syncPolicyPath", async () => {
+    const explicit = path.join(root, "explicit.jsonc")
+    const captured = createMockCtx(
+      { remove: ["paseo*"], configPath: false, syncPolicyPath: explicit },
+      projectDir,
+    )
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const parsed = parseJsonc(await fs.readFile(explicit, "utf-8"))
+    expect(parsed).toEqual({ experimental: { policies: [expect.objectContaining({ resource: "skill:paseo*" })] } })
+  })
+
+  it("re-applies removal when a compatibility layer injects the skill again", async () => {
+    const captured = createMockCtx({ remove: ["paseo*"], configPath: false }, projectDir, [
+      { id: "keep", name: "keep" },
+    ])
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const callback = captured.getCallback()
+    expect(callback).toBeDefined()
+
+    // 第一次组装：移除 paseo-cli
+    const first = createEditor([
+      { id: "paseo-cli", name: "paseo-cli" },
+      { id: "keep", name: "keep" },
+    ])
+    callback!(first.editor)
+    expect(first.store.has("paseo-cli")).toBe(false)
+
+    // 兼容层重载后又注入了 paseo-cli：第二次组装应再次剔除
+    const second = createEditor([
+      { id: "paseo-cli", name: "paseo-cli" },
+      { id: "keep", name: "keep" },
+    ])
+    callback!(second.editor)
+    expect(second.store.has("paseo-cli")).toBe(false)
+    expect(second.removedIds).toEqual(["paseo-cli"])
+
+    // 多次调用不会重复计数
+    const result = await captured.getTool("skills_list").execute({ status: "removed" }, {})
+    expect(result.metadata.removed).toBe(1)
   })
 })
 

@@ -23,6 +23,20 @@ export interface RemovedSkillEntry {
   description?: string
 }
 
+/** 内核级 Policy 同步摘要（由 `syncPolicy` 生成）。 */
+export interface PoliciesSummary {
+  /** 已生成并同步的 deny policy 模式（即 remove 规则）。 */
+  patterns: string[]
+  /** 是否成功定位到目标配置文件。 */
+  synced: boolean
+  /** 是否实际写入了文件。 */
+  written: boolean
+  /** 目标配置文件路径（若已定位）。 */
+  path?: string
+  /** 未同步 / 未写入的原因（诊断）。 */
+  reason?: string
+}
+
 /** 单个 skill 的可读摘要。 */
 export interface SkillListEntry {
   id?: string
@@ -47,6 +61,8 @@ export interface SkillsListReport {
   removed: number
   /** 按 status 过滤后的条目列表。 */
   skills: SkillListEntry[]
+  /** 内核 policy 同步摘要（仅在开启 `syncPolicy` 且存在 remove 规则时出现）。 */
+  policies?: PoliciesSummary
 }
 
 /**
@@ -124,13 +140,14 @@ function toRemovedEntry(removed: RemovedSkillEntry): SkillListEntry {
  *
  * - `total` = 存活数量 + 被移除数量（原始发现总数）
  * - `active` / `hidden` 基于当前存活的 skill 统计
- * - `removed` 为被硬剔除的数量
+ * - `removed` 为被硬剔除的数量（与存活列表按 id/name 去重，避免同一 skill 被重复计数）
  * - `skills` 则按 `status` 过滤，便于调用方一次拿到概览与明细
  */
 export function buildSkillsListReport(
   skills: readonly MutableSkill[],
   status: SkillsListStatus = "all",
   removed: readonly RemovedSkillEntry[] = [],
+  policies?: PoliciesSummary,
 ): SkillsListReport {
   const activeEntries: SkillListEntry[] = []
   let active = 0
@@ -146,7 +163,11 @@ export function buildSkillsListReport(
     activeEntries.push(entry)
   }
 
-  const removedEntries = removed.map(toRemovedEntry)
+  // 已被测到仍然存活的 skill 不计入 removed（例如 editor.remove 不可用时的降级）。
+  const liveKeys = new Set(activeEntries.map((entry) => entry.id ?? entry.name))
+  const removedEntries = removed
+    .filter((entry) => !liveKeys.has(entry.id ?? entry.name))
+    .map(toRemovedEntry)
 
   const allEntries = [...activeEntries, ...removedEntries]
   const filtered =
@@ -154,7 +175,7 @@ export function buildSkillsListReport(
       ? allEntries
       : allEntries.filter((entry) => entry.state === status)
 
-  return {
+  const report: SkillsListReport = {
     status,
     total: activeEntries.length + removedEntries.length,
     active,
@@ -162,6 +183,10 @@ export function buildSkillsListReport(
     removed: removedEntries.length,
     skills: filtered,
   }
+  if (policies) {
+    report.policies = policies
+  }
+  return report
 }
 
 /** 把报告渲染成便于模型阅读的紧凑文本。 */
@@ -170,17 +195,34 @@ export function formatSkillsList(report: SkillsListReport): string {
     `Skills (status=${report.status}): total=${report.total}, ` +
     `active=${report.active}, hidden=${report.hidden}, removed=${report.removed}`
 
-  if (report.skills.length === 0) {
-    return `${header}\n(no skills matched)`
+  const lines = [header]
+
+  if (report.policies) {
+    lines.push(formatPolicies(report.policies))
   }
 
-  const lines = report.skills.map((entry) => {
+  if (report.skills.length === 0) {
+    lines.push("(no skills matched)")
+    return lines.join("\n")
+  }
+
+  for (const entry of report.skills) {
     const id = entry.id && entry.id !== entry.name ? ` (${entry.id})` : ""
     const description = entry.description ? ` - ${entry.description}` : ""
-    return `- [${entry.state}] ${entry.name}${id}${description}`
-  })
+    lines.push(`- [${entry.state}] ${entry.name}${id}${description}`)
+  }
 
-  return [header, ...lines].join("\n")
+  return lines.join("\n")
+}
+
+/** 渲染内核 policy 同步状态行。 */
+function formatPolicies(policies: PoliciesSummary): string {
+  const target = policies.path ? ` -> ${policies.path}` : ""
+  const written = policies.written ? " (written)" : ""
+  const resources = policies.patterns.length
+    ? policies.patterns.map((pattern) => `skill:${pattern}`).join(", ")
+    : "none"
+  return `policy: synced=${policies.synced}${written} deny=[${resources}]${target}`
 }
 
 export interface SkillsListToolDeps {
@@ -188,6 +230,8 @@ export interface SkillsListToolDeps {
   listSkills: () => Promise<readonly MutableSkill[]> | readonly MutableSkill[]
   /** 读取本插件硬剔除（editor.remove）的 skill；用于统计 removed。 */
   getRemoved?: () => Promise<readonly RemovedSkillEntry[]> | readonly RemovedSkillEntry[]
+  /** 读取内核 policy 同步状态（可选）。 */
+  getPolicies?: () => Promise<PoliciesSummary | undefined> | PoliciesSummary | undefined
   logger?: Logger
 }
 
@@ -208,7 +252,8 @@ export function createSkillsListTool(deps: SkillsListToolDeps) {
       const status = normalizeStatus((input as { status?: unknown } | undefined)?.status)
       const skills = await deps.listSkills()
       const removed = deps.getRemoved ? await deps.getRemoved() : []
-      const report = buildSkillsListReport(skills, status, removed)
+      const policies = deps.getPolicies ? await deps.getPolicies() : undefined
+      const report = buildSkillsListReport(skills, status, removed, policies)
 
       logger.debug(
         `skills_list: status=${status} total=${report.total} ` +

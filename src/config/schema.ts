@@ -102,6 +102,22 @@ export function normalizeConfig(raw: unknown, source: string, depth = 0): SkillF
     config.configPath = raw.configPath
   }
 
+  if (raw.syncPolicy !== undefined) {
+    if (typeof raw.syncPolicy === "boolean") {
+      config.syncPolicy = raw.syncPolicy
+    } else {
+      warnInvalid(source, "syncPolicy", "boolean")
+    }
+  }
+
+  if (raw.syncPolicyPath !== undefined) {
+    if (typeof raw.syncPolicyPath === "string") {
+      config.syncPolicyPath = raw.syncPolicyPath
+    } else {
+      warnInvalid(source, "syncPolicyPath", "string")
+    }
+  }
+
   return config
 }
 
@@ -155,6 +171,15 @@ export function mergeConfigs(
   const configPath = higher.configPath ?? lower.configPath
   if (configPath !== undefined) {
     merged.configPath = configPath
+  }
+
+  const syncPolicy = higher.syncPolicy ?? lower.syncPolicy
+  if (syncPolicy !== undefined) {
+    merged.syncPolicy = syncPolicy
+  }
+  const syncPolicyPath = higher.syncPolicyPath ?? lower.syncPolicyPath
+  if (syncPolicyPath !== undefined) {
+    merged.syncPolicyPath = syncPolicyPath
   }
 
   return merged

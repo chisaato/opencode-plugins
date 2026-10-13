@@ -99,6 +99,34 @@ describe("buildSkillsListReport", () => {
     expect(report.total).toBe(4)
     expect(report.removed).toBe(1)
   })
+
+  it("does not double count a removed entry that is still live", () => {
+    const report = buildSkillsListReport(sample, "all", [
+      { id: "beta", name: "beta" },
+      { id: "gone", name: "gone" },
+    ])
+    // beta 仍然存活 → 不计入 removed；gone 计入
+    expect(report.total).toBe(4)
+    expect(report.removed).toBe(1)
+    expect(report.skills.filter((e) => e.state === "removed").map((e) => e.name)).toEqual(["gone"])
+  })
+
+  it("attaches a policies summary when provided", () => {
+    const report = buildSkillsListReport(sample, "all", [], {
+      patterns: ["paseo*"],
+      synced: true,
+      written: true,
+      path: "/home/me/.config/opencode/opencode.jsonc",
+    })
+    expect(report.policies).toEqual({
+      patterns: ["paseo*"],
+      synced: true,
+      written: true,
+      path: "/home/me/.config/opencode/opencode.jsonc",
+    })
+    // 未提供时不应出现该字段
+    expect(buildSkillsListReport(sample).policies).toBeUndefined()
+  })
 })
 
 describe("formatSkillsList", () => {
@@ -118,6 +146,20 @@ describe("formatSkillsList", () => {
   it("shows an empty marker when nothing matches", () => {
     const text = formatSkillsList(buildSkillsListReport([], "all"))
     expect(text).toContain("(no skills matched)")
+  })
+
+  it("renders a policy line when a summary is present", () => {
+    const text = formatSkillsList(
+      buildSkillsListReport(sample, "all", [], {
+        patterns: ["paseo*", "grill*"],
+        synced: true,
+        written: true,
+        path: "/home/me/.config/opencode/opencode.jsonc",
+      }),
+    )
+    expect(text).toContain("policy: synced=true (written)")
+    expect(text).toContain("deny=[skill:paseo*, skill:grill*]")
+    expect(text).toContain("/home/me/.config/opencode/opencode.jsonc")
   })
 })
 
@@ -163,5 +205,16 @@ describe("createSkillsListTool", () => {
     const metadata = result.metadata as unknown as SkillsListReport
     expect(metadata.status).toBe("all")
     expect(metadata.total).toBe(0)
+  })
+
+  it("execute surfaces the policy summary from getPolicies", async () => {
+    const tool = createSkillsListTool({
+      listSkills: () => [],
+      getPolicies: () => ({ patterns: ["paseo*"], synced: true, written: false }),
+    })
+    const result = await tool.execute({ status: "all" }, {})
+    const metadata = result.metadata as unknown as SkillsListReport
+    expect(metadata.policies).toEqual({ patterns: ["paseo*"], synced: true, written: false })
+    expect(result.content[0]?.text).toContain("policy: synced=true deny=[skill:paseo*]")
   })
 })
