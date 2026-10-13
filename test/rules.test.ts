@@ -4,11 +4,11 @@ import type { NormalizedRules } from "../src/types"
 
 function rules(partial: Partial<NormalizedRules> = {}): NormalizedRules {
   return {
+    remove: [],
     hide: [],
-    unhide: [],
+    enable: [],
     include: [],
     exclude: [],
-    restoreUnhidden: false,
     ...partial,
   }
 }
@@ -16,9 +16,15 @@ function rules(partial: Partial<NormalizedRules> = {}): NormalizedRules {
 const skill = { id: "skill-to-spec", name: "to-spec" }
 
 describe("decideAction", () => {
-  it("hides a skill that matches a hide pattern", () => {
+  it("soft-hides a skill that matches a hide pattern", () => {
     const decision = decideAction(skill, rules({ hide: ["to-*"] }))
     expect(decision.action).toBe("hide")
+    expect(decision.matched).toBe("to-*")
+  })
+
+  it("hard-removes a skill that matches a remove pattern", () => {
+    const decision = decideAction(skill, rules({ remove: ["to-*"] }))
+    expect(decision.action).toBe("remove")
     expect(decision.matched).toBe("to-*")
   })
 
@@ -26,18 +32,26 @@ describe("decideAction", () => {
     expect(decideAction({ name: "keep-me" }, rules({ hide: ["to-*"] })).action).toBe("leave")
   })
 
-  it("lets unhide win over hide", () => {
-    const decision = decideAction(skill, rules({ hide: ["to-*"], unhide: ["to-spec"] }))
-    expect(decision.action).toBe("leave")
-    expect(decision.reason).toContain("unhide")
+  it("enables (show) a skill that matches an enable pattern", () => {
+    const decision = decideAction(skill, rules({ enable: ["to-spec"] }))
+    expect(decision.action).toBe("show")
+    expect(decision.matched).toBe("to-spec")
   })
 
-  it("restores (show) unhidden skills when restoreUnhidden is on", () => {
-    const decision = decideAction(
-      skill,
-      rules({ hide: ["to-*"], unhide: ["to-spec"], restoreUnhidden: true }),
-    )
+  it("lets enable win over hide", () => {
+    const decision = decideAction(skill, rules({ hide: ["to-*"], enable: ["to-spec"] }))
     expect(decision.action).toBe("show")
+    expect(decision.reason).toContain("enable")
+  })
+
+  it("lets enable win over remove", () => {
+    const decision = decideAction(skill, rules({ remove: ["*"], enable: ["to-spec"] }))
+    expect(decision.action).toBe("show")
+  })
+
+  it("lets remove win over hide", () => {
+    const decision = decideAction(skill, rules({ remove: ["to-*"], hide: ["to-*"] }))
+    expect(decision.action).toBe("remove")
   })
 
   it("lets exclude bypass an otherwise-matching hide", () => {
@@ -46,26 +60,31 @@ describe("decideAction", () => {
     expect(decision.reason).toContain("exclude")
   })
 
+  it("lets exclude bypass an otherwise-matching remove", () => {
+    const decision = decideAction(skill, rules({ remove: ["to-*"], exclude: ["to-spec"] }))
+    expect(decision.action).toBe("leave")
+  })
+
   it("respects the include scope", () => {
     const inScope = decideAction({ name: "to-a" }, rules({ hide: ["*"], include: ["to-*"] }))
     expect(inScope.action).toBe("hide")
 
-    const outOfScope = decideAction({ name: "other" }, rules({ hide: ["*"], include: ["to-*"] }))
+    const outOfScope = decideAction({ name: "other" }, rules({ remove: ["*"], include: ["to-*"] }))
     expect(outOfScope.action).toBe("leave")
     expect(outOfScope.reason).toContain("include")
   })
 
   it("matches against the skill id as well as the name", () => {
-    const decision = decideAction({ id: "paseo/run", name: "run" }, rules({ hide: ["paseo/*"] }))
-    expect(decision.action).toBe("hide")
+    const decision = decideAction({ id: "paseo/run", name: "run" }, rules({ remove: ["paseo/*"] }))
+    expect(decision.action).toBe("remove")
   })
 
-  it("prefers unhide over exclude", () => {
+  it("lets enable beat exclude (enable is the highest priority)", () => {
     const decision = decideAction(
       { name: "x" },
-      rules({ unhide: ["x"], exclude: ["x"] }),
+      rules({ enable: ["x"], exclude: ["x"] }),
     )
-    expect(decision.reason).toContain("unhide")
+    expect(decision.action).toBe("show")
   })
 })
 
@@ -79,9 +98,11 @@ describe("hasWork", () => {
     expect(hasWork(rules({ hide: ["to-*"] }))).toBe(true)
   })
 
-  it("is true only when restoreUnhidden has unhide entries to act on", () => {
-    expect(hasWork(rules({ unhide: ["to-spec"] }))).toBe(false)
-    expect(hasWork(rules({ unhide: ["to-spec"], restoreUnhidden: true }))).toBe(true)
-    expect(hasWork(rules({ restoreUnhidden: true }))).toBe(false)
+  it("is true when remove rules exist", () => {
+    expect(hasWork(rules({ remove: ["paseo*"] }))).toBe(true)
+  })
+
+  it("is true when enable rules exist", () => {
+    expect(hasWork(rules({ enable: ["to-spec"] }))).toBe(true)
   })
 })

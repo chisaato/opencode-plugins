@@ -14,7 +14,7 @@ export interface MutableSkill {
  * OpenCode V2 的 `SkillEditor` 结构。
  *
  * 真实契约（@opencode/plugin 2.x）：
- * - `list()` / `update(id, cb)` / `get(id)` / `add()` / `remove()`
+ * - `list()` / `update(id, cb)` / `get(id)` / `add()` / `remove(id)`
  *
  * 同时兼容其它可能形态（如以 `skills` 记录暴露的编辑器），
  * 使得插件对宿主的内部表示变化更鲁棒。
@@ -23,6 +23,7 @@ export interface SkillEditorLike {
   list?(): readonly MutableSkill[]
   get?(id: string): MutableSkill | undefined
   update?(id: string, update: (skill: MutableSkill) => void): void
+  remove?(id: string): void
   skills?: Record<string, MutableSkill> | readonly MutableSkill[]
 }
 
@@ -31,8 +32,16 @@ export interface ApplyResult {
   examined: number
   /** 被隐藏（autoinvoke → false）的 skill 标识 */
   hidden: string[]
-  /** 被恢复（autoinvoke → true）的 skill 标识 */
+  /** 被激活（autoinvoke → true）的 skill 标识 */
   shown: string[]
+  /** 被硬剔除（editor.remove）的 skill 标识 */
+  removed: string[]
+}
+
+/** 应用过滤时的可选回调，用于把被移除的 skill 暴露给上层（如 skills_list）。 */
+export interface ApplyHooks {
+  /** 每当一个 skill 被成功 remove 时调用。 */
+  onRemove?: (skill: MutableSkill, label: string) => void
 }
 
 /**
@@ -73,20 +82,24 @@ export function collectSkills(editor: SkillEditorLike): MutableSkill[] {
 /**
  * 对编辑器中的全部 skill 应用过滤规则。
  *
+ * - 命中 `remove` 的 skill：`editor.remove(id)` 硬剔除（记录到 removed）
  * - 命中 `hide` 的 skill：`autoinvoke = false`（优雅跳过已经是目标值的项）
- * - 命中 `unhide` 且开启 `restoreUnhidden`：`autoinvoke = true`
+ * - 命中 `enable` 的 skill：`autoinvoke = true`（压过 remove / hide）
  * - 其余保持原样
  *
- * 修改优先走 `editor.update`（V2 契约），不可用时回退为直接修改对象。
+ * 修改优先走 `editor.update` / `editor.remove`（V2 契约），
+ * 不可用时回退为直接修改对象。
  */
 export function applyFilter(
   editor: SkillEditorLike,
   rules: NormalizedRules,
   logger: Logger = silentLogger,
+  hooks?: ApplyHooks,
 ): ApplyResult {
   const skills = collectSkills(editor)
   const hidden: string[] = []
   const shown: string[] = []
+  const removed: string[] = []
 
   for (const skill of skills) {
     const identity: SkillIdentity = { id: skill.id, name: skill.name }
@@ -95,6 +108,15 @@ export function applyFilter(
 
     if (decision.action === "leave") {
       logger.debug(`leave ${label}: ${decision.reason}`)
+      continue
+    }
+
+    if (decision.action === "remove") {
+      if (removeSkill(editor, skill, logger)) {
+        removed.push(label)
+        hooks?.onRemove?.(skill, label)
+        logger.debug(`removed ${label}: ${decision.reason}`)
+      }
       continue
     }
 
@@ -118,7 +140,33 @@ export function applyFilter(
     logger.debug(`set autoinvoke=${targetValue} on ${label}: ${decision.reason}`)
   }
 
-  return { examined: skills.length, hidden, shown }
+  return { examined: skills.length, hidden, shown, removed }
+}
+
+/**
+ * 硬剔除一个 skill。
+ *
+ * 优先走 `editor.remove(id)`；当编辑器未暴露 `remove` 时，
+ * 退化为软隐藏（autoinvoke=false）并给出警告，避免直接丢规则。
+ */
+function removeSkill(editor: SkillEditorLike, skill: MutableSkill, logger: Logger): boolean {
+  const id = skill.id ?? skill.name
+  if (typeof editor.remove === "function" && id) {
+    try {
+      editor.remove(id)
+      return true
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      logger.warn(`remove(${id}) failed, falling back to autoinvoke=false: ${reason}`)
+    }
+  } else if (!id) {
+    logger.warn("cannot determine skill id for remove; skipping")
+    return false
+  } else {
+    logger.warn(`editor.remove unavailable; hiding ${id} instead of removing`)
+  }
+
+  return writeAutoinvoke(editor, skill, false, logger)
 }
 
 /** 写入 autoinvoke，优先使用 editor.update。 */

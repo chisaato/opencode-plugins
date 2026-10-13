@@ -7,6 +7,7 @@ export type {
   NormalizedRules,
 } from "./types"
 export { loadConfig } from "./config/loader"
+export { resolveOverrides, matchesDirectory } from "./config/overrides"
 export { applyFilter } from "./filter/apply"
 export { decideAction, hasWork } from "./matching/rules"
 export { matchesPattern, globToRegExp } from "./matching/glob"
@@ -17,6 +18,12 @@ export {
   createSkillsListTool,
   formatSkillsList,
 } from "./tool/skills-list"
-export type { SkillsListReport, SkillListEntry, SkillsListStatus } from "./tool/skills-list"
+export type {
+  SkillsListReport,
+  SkillListEntry,
+  RemovedSkillEntry,
+  SkillState,
+  SkillsListStatus,
+} from "./tool/skills-list"
 
 export default SkillFilterPlugin

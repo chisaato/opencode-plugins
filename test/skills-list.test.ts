@@ -31,6 +31,7 @@ describe("buildSkillsListReport", () => {
     expect(report.total).toBe(3)
     expect(report.active).toBe(2)
     expect(report.hidden).toBe(1)
+    expect(report.removed).toBe(0)
     expect(report.status).toBe("all")
     expect(report.skills).toHaveLength(3)
   })
@@ -54,23 +55,64 @@ describe("buildSkillsListReport", () => {
     const report = buildSkillsListReport(sample, "all")
     const alpha = report.skills.find((e) => e.name === "alpha")
     const gamma = report.skills.find((e) => e.name === "gamma")
-    expect(alpha).toMatchObject({ id: "alpha", autoinvoke: true, hidden: false, description: "first" })
+    expect(alpha).toMatchObject({
+      id: "alpha",
+      autoinvoke: true,
+      hidden: false,
+      removed: false,
+      state: "active",
+      description: "first",
+    })
     expect(gamma).not.toHaveProperty("description")
   })
 
   it("falls back to id when name is missing and handles an empty list", () => {
     const report = buildSkillsListReport([{ id: "only-id" }], "all")
     expect(report.skills[0]?.name).toBe("only-id")
-    expect(buildSkillsListReport([], "all")).toMatchObject({ total: 0, active: 0, hidden: 0 })
+    expect(buildSkillsListReport([], "all")).toMatchObject({ total: 0, active: 0, hidden: 0, removed: 0 })
+  })
+
+  it("reports removed skills and folds them into the total", () => {
+    const report = buildSkillsListReport(sample, "all", [
+      { id: "paseo-cli", name: "paseo-cli", description: "paseo tool" },
+    ])
+    // 原始发现总数 = 存活 3 + 移除 1
+    expect(report.total).toBe(4)
+    expect(report.active).toBe(2)
+    expect(report.hidden).toBe(1)
+    expect(report.removed).toBe(1)
+    expect(report.skills).toHaveLength(4)
+    const removedEntry = report.skills.find((e) => e.name === "paseo-cli")
+    expect(removedEntry).toMatchObject({
+      id: "paseo-cli",
+      state: "removed",
+      removed: true,
+      hidden: false,
+      description: "paseo tool",
+    })
+  })
+
+  it("filters to only removed entries when status=removed", () => {
+    const report = buildSkillsListReport(sample, "removed", [{ name: "gone" }])
+    expect(report.skills.map((e) => e.name)).toEqual(["gone"])
+    // global counts still span everything
+    expect(report.total).toBe(4)
+    expect(report.removed).toBe(1)
   })
 })
 
 describe("formatSkillsList", () => {
   it("renders a header and one line per skill", () => {
     const text = formatSkillsList(buildSkillsListReport(sample, "all"))
-    expect(text).toContain("total=3, active=2, hidden=1")
+    expect(text).toContain("total=3, active=2, hidden=1, removed=0")
     expect(text).toContain("- [active] alpha - first")
     expect(text).toContain("- [hidden] beta")
+  })
+
+  it("renders removed entries with a [removed] marker", () => {
+    const text = formatSkillsList(buildSkillsListReport([], "all", [{ name: "gone" }]))
+    expect(text).toContain("removed=1")
+    expect(text).toContain("- [removed] gone")
   })
 
   it("shows an empty marker when nothing matches", () => {
@@ -85,7 +127,9 @@ describe("createSkillsListTool", () => {
     expect(tool.name).toBe(SKILLS_LIST_TOOL_NAME)
     expect(tool.description).toBe(SKILLS_LIST_TOOL_DESCRIPTION)
     expect(tool.input).toBe(SKILLS_LIST_INPUT_SCHEMA)
-    expect(tool.input.properties.status).toMatchObject({ enum: ["all", "active", "hidden"] })
+    expect(tool.input.properties.status).toMatchObject({
+      enum: ["all", "active", "hidden", "removed"],
+    })
     expect(typeof tool.execute).toBe("function")
   })
 
@@ -99,6 +143,18 @@ describe("createSkillsListTool", () => {
     const metadata = result.metadata as unknown as SkillsListReport
     expect(metadata.total).toBe(3)
     expect(metadata.skills).toHaveLength(3)
+  })
+
+  it("execute merges removed skills from getRemoved", async () => {
+    const tool = createSkillsListTool({
+      listSkills: async () => sample,
+      getRemoved: async () => [{ id: "paseo", name: "paseo" }],
+    })
+    const result = await tool.execute({ status: "removed" }, {})
+    const metadata = result.metadata as unknown as SkillsListReport
+    expect(metadata.total).toBe(4)
+    expect(metadata.removed).toBe(1)
+    expect(metadata.skills.map((e) => e.name)).toEqual(["paseo"])
   })
 
   it("execute tolerates missing input", async () => {

@@ -7,7 +7,14 @@ export interface SkillIdentity {
   name?: string
 }
 
-export type FilterAction = "hide" | "show" | "leave"
+/**
+ * 判定动作：
+ * - `remove` 硬剔除（editor.remove）
+ * - `hide`   软隐藏（autoinvoke = false）
+ * - `show`   显式激活（autoinvoke = true）
+ * - `leave`  保持原样
+ */
+export type FilterAction = "remove" | "hide" | "show" | "leave"
 
 export interface Decision {
   action: FilterAction
@@ -21,23 +28,21 @@ export interface Decision {
  * 计算单个 skill 应执行的动作。
  *
  * 优先级（由高到低）：
- * 1. `unhide`   白名单 —— 命中的 skill 永不隐藏；开启 restoreUnhidden 时返回 `show`
+ * 1. `enable`   显式激活 —— 命中即返回 `show`（压过 remove / hide）
  * 2. `exclude`  排除项 —— 命中则完全不处理
  * 3. `include`  收窄范围 —— 非空时，未命中的 skill 不处理
- * 4. `hide`     命中则隐藏（autoinvoke = false）
- * 5. 其余情况保持原样
+ * 4. `remove`   命中则硬剔除（editor.remove）
+ * 5. `hide`     命中则软隐藏（autoinvoke = false）
+ * 6. 其余情况保持原样
  *
  * 判定会同时考察 skill 的 name 与 id，任一命中即视为命中。
  */
 export function decideAction(skill: SkillIdentity, rules: NormalizedRules): Decision {
   const targets = uniqueTargets(skill)
 
-  const unhidden = firstMatchAcross(targets, rules.unhide)
-  if (unhidden) {
-    if (rules.restoreUnhidden) {
-      return { action: "show", reason: "matched unhide (restore)", matched: unhidden }
-    }
-    return { action: "leave", reason: "matched unhide (keep visible)", matched: unhidden }
+  const enabled = firstMatchAcross(targets, rules.enable)
+  if (enabled) {
+    return { action: "show", reason: "matched enable", matched: enabled }
   }
 
   const excluded = firstMatchAcross(targets, rules.exclude)
@@ -47,6 +52,11 @@ export function decideAction(skill: SkillIdentity, rules: NormalizedRules): Deci
 
   if (rules.include.length > 0 && !firstMatchAcross(targets, rules.include)) {
     return { action: "leave", reason: "not in include scope" }
+  }
+
+  const removed = firstMatchAcross(targets, rules.remove)
+  if (removed) {
+    return { action: "remove", reason: "matched remove", matched: removed }
   }
 
   const hidden = firstMatchAcross(targets, rules.hide)
@@ -59,7 +69,7 @@ export function decideAction(skill: SkillIdentity, rules: NormalizedRules): Deci
 
 /** 是否配置了任何会产生副作用的规则。 */
 export function hasWork(rules: NormalizedRules): boolean {
-  return rules.hide.length > 0 || (rules.restoreUnhidden && rules.unhide.length > 0)
+  return rules.remove.length > 0 || rules.hide.length > 0 || rules.enable.length > 0
 }
 
 function uniqueTargets(skill: SkillIdentity): string[] {

@@ -5,19 +5,24 @@ import type { NormalizedRules } from "../src/types"
 
 function rules(partial: Partial<NormalizedRules> = {}): NormalizedRules {
   return {
+    remove: [],
     hide: [],
-    unhide: [],
+    enable: [],
     include: [],
     exclude: [],
-    restoreUnhidden: false,
     ...partial,
   }
 }
 
-/** 模拟 V2 SkillEditor：list() 返回副本，update() 写回真实对象。 */
-function createEditor(skills: MutableSkill[]) {
+/**
+ * 模拟 V2 SkillEditor：list() 返回副本，update()/remove() 写回真实 store。
+ * `remove` 关闭时用于验证回退行为。
+ */
+function createEditor(skills: MutableSkill[], options: { withRemove?: boolean } = {}) {
+  const withRemove = options.withRemove ?? true
   const store = new Map(skills.map((s) => [s.id as string, s]))
   const updateCalls: string[] = []
+  const removeCalls: string[] = []
   const editor: SkillEditorLike = {
     list: () => Array.from(store.values()).map((s) => ({ ...s })),
     get: (id) => store.get(id),
@@ -30,7 +35,16 @@ function createEditor(skills: MutableSkill[]) {
       updateCalls.push(id)
     },
   }
-  return { editor, store, updateCalls }
+  if (withRemove) {
+    editor.remove = (id) => {
+      if (!store.has(id)) {
+        throw new Error(`unknown skill: ${id}`)
+      }
+      store.delete(id)
+      removeCalls.push(id)
+    }
+  }
+  return { editor, store, updateCalls, removeCalls }
 }
 
 describe("collectSkills", () => {
@@ -79,15 +93,59 @@ describe("applyFilter", () => {
       { id: "keep", name: "keep", autoinvoke: true },
     ])
 
-    const result = applyFilter(editor, rules({ hide: ["ask-matt", "to-*"], unhide: ["to-spec"] }))
+    const result = applyFilter(editor, rules({ hide: ["ask-matt", "to-*"], enable: ["to-spec"] }))
 
     expect(store.get("ask-matt")?.autoinvoke).toBe(false)
     expect(store.get("to-plan")?.autoinvoke).toBe(false)
-    // unhide keeps its value untouched
-    expect(store.get("to-spec")?.autoinvoke).toBeUndefined()
+    // enable forces autoinvoke=true (explicit activation)
+    expect(store.get("to-spec")?.autoinvoke).toBe(true)
     expect(store.get("keep")?.autoinvoke).toBe(true)
     expect(result.hidden.sort()).toEqual(["ask-matt", "to-plan"])
-    expect(updateCalls.sort()).toEqual(["ask-matt", "to-plan"])
+    expect(result.shown).toEqual(["to-spec"])
+    expect(updateCalls.sort()).toEqual(["ask-matt", "to-plan", "to-spec"])
+  })
+
+  it("removes skills via editor.remove and records them", () => {
+    const { editor, store, removeCalls } = createEditor([
+      { id: "paseo-cli", name: "paseo-cli", description: "paseo" },
+      { id: "keep", name: "keep" },
+    ])
+
+    const removed: Array<{ skill: MutableSkill; label: string }> = []
+    const result = applyFilter(editor, rules({ remove: ["paseo*"] }), undefined, {
+      onRemove: (skill, label) => removed.push({ skill, label }),
+    })
+
+    expect(store.has("paseo-cli")).toBe(false)
+    expect(store.has("keep")).toBe(true)
+    expect(removeCalls).toEqual(["paseo-cli"])
+    expect(result.removed).toEqual(["paseo-cli"])
+    expect(removed).toHaveLength(1)
+    expect(removed[0]?.skill.id).toBe("paseo-cli")
+    expect(removed[0]?.label).toBe("paseo-cli")
+  })
+
+  it("lets enable win over remove (nothing is removed)", () => {
+    const { editor, store, removeCalls } = createEditor([
+      { id: "to-spec", name: "to-spec" },
+    ])
+    const result = applyFilter(editor, rules({ remove: ["to-*"], enable: ["to-spec"] }))
+    expect(store.has("to-spec")).toBe(true)
+    expect(store.get("to-spec")?.autoinvoke).toBe(true)
+    expect(removeCalls).toEqual([])
+    expect(result.removed).toEqual([])
+  })
+
+  it("falls back to autoinvoke=false when editor.remove is unavailable", () => {
+    const { editor, store } = createEditor([{ id: "paseo-cli", name: "paseo-cli" }], {
+      withRemove: false,
+    })
+    const warn = vi.fn()
+    const logger = createLogger(true, { debug: () => {}, info: () => {}, warn })
+    const result = applyFilter(editor, rules({ remove: ["paseo*"] }), logger)
+    expect(store.get("paseo-cli")?.autoinvoke).toBe(false)
+    expect(result.removed).toEqual(["paseo-cli"])
+    expect(warn).toHaveBeenCalled()
   })
 
   it("skips skills already at the desired value", () => {
@@ -99,14 +157,11 @@ describe("applyFilter", () => {
     expect(result.hidden).toEqual([])
   })
 
-  it("restores unhidden skills to autoinvoke=true when configured", () => {
+  it("activates enabled skills to autoinvoke=true", () => {
     const { editor, store } = createEditor([
       { id: "to-spec", name: "to-spec", autoinvoke: false },
     ])
-    const result = applyFilter(
-      editor,
-      rules({ hide: ["to-*"], unhide: ["to-spec"], restoreUnhidden: true }),
-    )
+    const result = applyFilter(editor, rules({ hide: ["to-*"], enable: ["to-spec"] }))
     expect(store.get("to-spec")?.autoinvoke).toBe(true)
     expect(result.shown).toEqual(["to-spec"])
   })

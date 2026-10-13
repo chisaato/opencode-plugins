@@ -74,14 +74,20 @@ function createMockCtx(
 
 function createEditor(skills: MutableSkill[]) {
   const store = new Map(skills.map((s) => [s.id as string, s]))
+  const removedIds: string[] = []
   const editor: SkillEditorLike = {
     list: () => Array.from(store.values()).map((s) => ({ ...s })),
+    get: (id) => store.get(id),
     update: (id, updater) => {
       const target = store.get(id)
       if (target) updater(target)
     },
+    remove: (id) => {
+      store.delete(id)
+      removedIds.push(id)
+    },
   }
-  return { editor, store }
+  return { editor, store, removedIds }
 }
 
 describe("plugin contract", () => {
@@ -143,11 +149,45 @@ describe("plugin setup", () => {
 
     expect(store.get("ask-matt")?.autoinvoke).toBe(false)
     expect(store.get("to-plan")?.autoinvoke).toBe(false)
-    expect(store.get("to-spec")?.autoinvoke).toBeUndefined()
+    // legacy unhide → enable → explicitly activated
+    expect(store.get("to-spec")?.autoinvoke).toBe(true)
     expect(store.get("keep")?.autoinvoke).toBeUndefined()
   })
 
-  it("does not register a transform when no hide rules are configured", async () => {
+  it("hard-removes matching skills via editor.remove", async () => {
+    const captured = createMockCtx({ remove: ["paseo*"], configPath: false }, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const callback = captured.getCallback()
+    const { editor, store, removedIds } = createEditor([
+      { id: "paseo-cli", name: "paseo-cli" },
+      { id: "keep", name: "keep" },
+    ])
+    callback!(editor)
+
+    expect(store.has("paseo-cli")).toBe(false)
+    expect(store.has("keep")).toBe(true)
+    expect(removedIds).toEqual(["paseo-cli"])
+  })
+
+  it("lets enable override remove (enable has the highest priority)", async () => {
+    const captured = createMockCtx({ remove: ["to-*"], enable: ["to-spec"], configPath: false }, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const callback = captured.getCallback()
+    const { editor, store, removedIds } = createEditor([
+      { id: "to-spec", name: "to-spec" },
+      { id: "to-plan", name: "to-plan" },
+    ])
+    callback!(editor)
+
+    expect(store.has("to-spec")).toBe(true)
+    expect(store.get("to-spec")?.autoinvoke).toBe(true)
+    expect(store.has("to-plan")).toBe(false)
+    expect(removedIds).toEqual(["to-plan"])
+  })
+
+  it("does not register a transform when no rules are configured", async () => {
     const captured = createMockCtx({ configPath: false }, projectDir)
     await SkillFilterPlugin.setup(captured.ctx)
     expect(captured.transformCalls).toBe(0)
@@ -197,6 +237,32 @@ describe("plugin setup", () => {
     expect(store.get("from-file")?.autoinvoke).toBeUndefined()
   })
 
+  it("applies a global directory override matched by the project path", async () => {
+    // 全局配置里针对 “project” 目录写 override：彻底掩埋 paseo*
+    await fs.writeFile(
+      path.join(home, ".config", "opencode", "skill-filter.json"),
+      JSON.stringify({
+        hide: ["base-hide"],
+        overrides: { "*/project": { remove: ["paseo*"], enable: ["base-hide"] } },
+      }),
+    )
+
+    const captured = createMockCtx({}, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const callback = captured.getCallback()
+    expect(callback).toBeDefined()
+
+    const { editor, store } = createEditor([
+      { id: "paseo-cli", name: "paseo-cli" },
+      { id: "base-hide", name: "base-hide" },
+    ])
+    callback!(editor)
+
+    expect(store.has("paseo-cli")).toBe(false)
+    expect(store.get("base-hide")?.autoinvoke).toBe(true)
+  })
+
   it("tolerates an options object with malformed values", async () => {
     const captured = createMockCtx({ hide: "nope", configPath: false }, projectDir)
     await expect(SkillFilterPlugin.setup(captured.ctx)).resolves.toBeUndefined()
@@ -239,10 +305,10 @@ describe("skills_list tool registration", () => {
     expect(tool.input.type).toBe("object")
   })
 
-  it("registers the tool even when no hide rules are configured", async () => {
+  it("registers the tool even when no rules are configured", async () => {
     const captured = createMockCtx({ configPath: false }, projectDir)
     await SkillFilterPlugin.setup(captured.ctx)
-    // 没有 hide 规则 → 不注册 skill transform，但工具仍应可用。
+    // 没有任何治理规则 → 不注册 skill transform，但工具仍应可用。
     expect(captured.transformCalls).toBe(0)
     expect(captured.getTool("skills_list")).toBeDefined()
   })
@@ -268,6 +334,7 @@ describe("skills_list tool registration", () => {
     expect(result.metadata.total).toBe(3)
     expect(result.metadata.active).toBe(2)
     expect(result.metadata.hidden).toBe(1)
+    expect(result.metadata.removed).toBe(0)
     expect(result.content[0].type).toBe("text")
     expect(result.content[0].text).toContain("total=3")
     expect(result.content[0].text).toContain("[hidden] beta")
@@ -280,6 +347,33 @@ describe("skills_list tool registration", () => {
     expect(activeOnly.metadata.skills.map((entry: { name: string }) => entry.name)).toEqual([
       "alpha",
       "gamma",
+    ])
+  })
+
+  it("skills_list execute reports removed skills recorded during applyFilter", async () => {
+    // 模拟“移除后”的存活列表：只剩 keep。
+    const captured = createMockCtx({ remove: ["paseo*"], configPath: false }, projectDir, [
+      { id: "keep", name: "keep" },
+    ])
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    // 触发 transform，让插件记录被移除的 paseo-cli。
+    const { editor } = createEditor([
+      { id: "paseo-cli", name: "paseo-cli", description: "paseo tool" },
+      { id: "keep", name: "keep" },
+    ])
+    captured.getCallback()!(editor)
+
+    const tool = captured.getTool("skills_list")
+    const all = await tool.execute({ status: "all" }, {})
+    expect(all.metadata.total).toBe(2)
+    expect(all.metadata.active).toBe(1)
+    expect(all.metadata.removed).toBe(1)
+    expect(all.content[0].text).toContain("[removed] paseo-cli")
+
+    const removedOnly = await tool.execute({ status: "removed" }, {})
+    expect(removedOnly.metadata.skills.map((entry: { name: string }) => entry.name)).toEqual([
+      "paseo-cli",
     ])
   })
 
