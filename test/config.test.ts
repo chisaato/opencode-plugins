@@ -150,4 +150,26 @@ describe("loadConfig", () => {
     expect(resolved.rules.hide).toEqual([])
     expect(resolved.rules.unhide).toEqual(["to-spec"])
   })
+
+  it("defaults exposeTool to true and lets inline options disable it", async () => {
+    const byDefault = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+    expect(byDefault.exposeTool).toBe(true)
+
+    const disabled = await loadConfig({
+      projectDirectory: projectDir,
+      homeDirectory: home,
+      inline: { exposeTool: false },
+    })
+    expect(disabled.exposeTool).toBe(false)
+  })
+
+  it("reads exposeTool from the file and lets an invalid value fall back to default", async () => {
+    await writeProjectConfig({ exposeTool: false })
+    const fromFile = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+    expect(fromFile.exposeTool).toBe(false)
+
+    await writeProjectConfig({ exposeTool: "yes" })
+    const invalid = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+    expect(invalid.exposeTool).toBe(true)
+  })
 })

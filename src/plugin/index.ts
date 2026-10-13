@@ -1,12 +1,15 @@
 import { Plugin } from "@opencode/plugin"
 import { loadConfig } from "../config/loader"
-import { applyFilter, type SkillEditorLike } from "../filter/apply"
+import { applyFilter, type MutableSkill, type SkillEditorLike } from "../filter/apply"
 import { hasWork } from "../matching/rules"
+import { createSkillsListTool, SKILLS_LIST_TOOL_NAME } from "../tool/skills-list"
 import { createLogger } from "../utils/logger"
 
 /**
  * OpenCode V2 插件：按规则把多余/冲突的 skill 设为 `autoinvoke = false`，
  * 使其不出现在模型的 available_skills 列表中，但仍可通过 `@name` 主动调用。
+ *
+ * 同时（默认）注册 `skills_list` 工具，便于运行时查看 skill 的过滤/隐藏状态。
  */
 export const SkillFilterPlugin = Plugin.define({
   id: "opencode-skill-filter",
@@ -14,11 +17,33 @@ export const SkillFilterPlugin = Plugin.define({
     const projectDirectory = ctx.location?.directory
     const inline = ctx.options as Record<string, unknown> | undefined
 
-    const { rules, debug, sources } = await loadConfig({ projectDirectory, inline })
+    const { rules, debug, exposeTool, sources } = await loadConfig({ projectDirectory, inline })
     const logger = createLogger(debug)
 
     if (sources.length > 0) {
       logger.debug(`config sources: ${sources.join(", ")}`)
+    }
+
+    // 注册 skills_list 工具：独立于 hide 规则，即便没有过滤规则也可用。
+    if (exposeTool) {
+      await ctx.tool.transform((editor) => {
+        const already = editor.list().some((tool) => tool.name === SKILLS_LIST_TOOL_NAME)
+        if (already) {
+          logger.debug(`${SKILLS_LIST_TOOL_NAME} tool already registered; skipping`)
+          return
+        }
+
+        editor.add(
+          createSkillsListTool({
+            listSkills: async () => {
+              const result = await ctx.skill.list()
+              return (result?.data ?? []) as MutableSkill[]
+            },
+            logger,
+          }),
+        )
+        logger.debug(`registered ${SKILLS_LIST_TOOL_NAME} tool`)
+      })
     }
 
     if (!hasWork(rules)) {

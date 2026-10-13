@@ -16,6 +16,8 @@ export interface LoadConfigOptions extends PathResolutionOptions {
 export interface ResolvedConfig {
   rules: NormalizedRules
   debug: boolean
+  /** 是否注册 `skills_list` 工具（默认 true）。 */
+  exposeTool: boolean
   /** 成功读取的来源（文件路径，以及内联 options 的标记）。 */
   sources: string[]
 }
@@ -82,6 +84,7 @@ export async function loadConfig(options?: LoadConfigOptions): Promise<ResolvedC
   return {
     rules: toRules(merged),
     debug: merged.debug ?? true,
+    exposeTool: merged.exposeTool ?? true,
     sources,
   }
 }

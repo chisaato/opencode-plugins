@@ -33,6 +33,13 @@ export interface SkillFilterConfig {
   debug?: boolean
 
   /**
+   * 是否注册 `skills_list` 自定义工具（默认 true）。
+   *
+   * 关闭后插件只做 skill 过滤，不向工具域暴露查询工具。
+   */
+  exposeTool?: boolean
+
+  /**
    * 显式指定配置文件路径。
    * - 字符串：直接读取该文件，跳过默认搜索顺序
    * - `false`：完全跳过文件加载（仅使用内联 options）

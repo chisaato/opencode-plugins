@@ -1,0 +1,111 @@
+import { describe, it, expect } from "vitest"
+import {
+  buildSkillsListReport,
+  createSkillsListTool,
+  formatSkillsList,
+  isSkillHidden,
+  SKILLS_LIST_INPUT_SCHEMA,
+  SKILLS_LIST_TOOL_DESCRIPTION,
+  SKILLS_LIST_TOOL_NAME,
+  type SkillsListReport,
+} from "../src/tool/skills-list"
+import type { MutableSkill } from "../src/filter/apply"
+
+const sample: MutableSkill[] = [
+  { id: "alpha", name: "alpha", description: "first", autoinvoke: true },
+  { id: "beta", name: "beta", autoinvoke: false },
+  { id: "gamma", name: "gamma", description: "" },
+]
+
+describe("isSkillHidden", () => {
+  it("treats autoinvoke === false as hidden and everything else as active", () => {
+    expect(isSkillHidden({ autoinvoke: false })).toBe(true)
+    expect(isSkillHidden({ autoinvoke: true })).toBe(false)
+    expect(isSkillHidden({})).toBe(false)
+  })
+})
+
+describe("buildSkillsListReport", () => {
+  it("counts total/active/hidden across the whole list", () => {
+    const report = buildSkillsListReport(sample, "all")
+    expect(report.total).toBe(3)
+    expect(report.active).toBe(2)
+    expect(report.hidden).toBe(1)
+    expect(report.status).toBe("all")
+    expect(report.skills).toHaveLength(3)
+  })
+
+  it("defaults to all when no status is given", () => {
+    expect(buildSkillsListReport(sample).status).toBe("all")
+  })
+
+  it("filters the skill list by status while keeping global counts", () => {
+    const hidden = buildSkillsListReport(sample, "hidden")
+    expect(hidden.total).toBe(3)
+    expect(hidden.hidden).toBe(1)
+    expect(hidden.skills.map((e) => e.name)).toEqual(["beta"])
+
+    const active = buildSkillsListReport(sample, "active")
+    expect(active.active).toBe(2)
+    expect(active.skills.map((e) => e.name)).toEqual(["alpha", "gamma"])
+  })
+
+  it("exposes autoinvoke and hidden flags, omitting empty description", () => {
+    const report = buildSkillsListReport(sample, "all")
+    const alpha = report.skills.find((e) => e.name === "alpha")
+    const gamma = report.skills.find((e) => e.name === "gamma")
+    expect(alpha).toMatchObject({ id: "alpha", autoinvoke: true, hidden: false, description: "first" })
+    expect(gamma).not.toHaveProperty("description")
+  })
+
+  it("falls back to id when name is missing and handles an empty list", () => {
+    const report = buildSkillsListReport([{ id: "only-id" }], "all")
+    expect(report.skills[0]?.name).toBe("only-id")
+    expect(buildSkillsListReport([], "all")).toMatchObject({ total: 0, active: 0, hidden: 0 })
+  })
+})
+
+describe("formatSkillsList", () => {
+  it("renders a header and one line per skill", () => {
+    const text = formatSkillsList(buildSkillsListReport(sample, "all"))
+    expect(text).toContain("total=3, active=2, hidden=1")
+    expect(text).toContain("- [active] alpha - first")
+    expect(text).toContain("- [hidden] beta")
+  })
+
+  it("shows an empty marker when nothing matches", () => {
+    const text = formatSkillsList(buildSkillsListReport([], "all"))
+    expect(text).toContain("(no skills matched)")
+  })
+})
+
+describe("createSkillsListTool", () => {
+  it("returns a Tool.Info-shaped definition with the expected metadata", () => {
+    const tool = createSkillsListTool({ listSkills: () => sample })
+    expect(tool.name).toBe(SKILLS_LIST_TOOL_NAME)
+    expect(tool.description).toBe(SKILLS_LIST_TOOL_DESCRIPTION)
+    expect(tool.input).toBe(SKILLS_LIST_INPUT_SCHEMA)
+    expect(tool.input.properties.status).toMatchObject({ enum: ["all", "active", "hidden"] })
+    expect(typeof tool.execute).toBe("function")
+  })
+
+  it("execute awaits listSkills and returns content + metadata", async () => {
+    const tool = createSkillsListTool({
+      listSkills: async () => sample,
+    })
+    const result = await tool.execute({ status: "all" }, {})
+    expect(result.content[0]?.type).toBe("text")
+    expect(result.content[0]?.text).toContain("total=3")
+    const metadata = result.metadata as unknown as SkillsListReport
+    expect(metadata.total).toBe(3)
+    expect(metadata.skills).toHaveLength(3)
+  })
+
+  it("execute tolerates missing input", async () => {
+    const tool = createSkillsListTool({ listSkills: () => [] })
+    const result = await tool.execute(undefined, {})
+    const metadata = result.metadata as unknown as SkillsListReport
+    expect(metadata.status).toBe("all")
+    expect(metadata.total).toBe(0)
+  })
+})

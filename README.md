@@ -2,6 +2,8 @@
 
 OpenCode V2 插件：把多余或相互冲突的 skill **隐藏**（设置 `autoinvoke: false`），使它们不再出现在模型的 `available_skills` 列表中，从而节省 token 并避免指令冲突 —— 同时用户依然可以通过 `@skill-name` 主动调用。
 
+同时提供一个只读工具 `skills_list`，方便在会话中随时查看当前加载的 skill 及其过滤/隐藏状态。
+
 > 仅支持 OpenCode V2（`@opencode/plugin` 2.x）。
 
 ## 解决的问题
@@ -60,6 +62,7 @@ OpenCode V2 插件：把多余或相互冲突的 skill **隐藏**（设置 `auto
 | `patterns.exclude` | `string[]` | 永不处理这些 skill（优先级：`unhide` > `exclude` > `hide`） |
 | `restoreUnhidden` | `boolean` | 默认 `false`。开启后，命中 `unhide` 的 skill 会被主动设为 `autoinvoke: true` |
 | `debug` | `boolean` | 默认 `true`。通过 `console.debug` 输出命中的规则与修改记录 |
+| `exposeTool` | `boolean` | 默认 `true`。是否注册 `skills_list` 工具；设为 `false` 时插件只做过滤，不暴露查询工具 |
 | `configPath` | `string \| false` | 显式指定配置文件路径；`false` 表示完全跳过文件加载，仅用内联 options |
 
 ### 内联传参示例
@@ -104,6 +107,7 @@ unhide  >  exclude  >  include(范围门槛)  >  hide  >  保持原样
 opencode 启动
   └─ plugin setup(ctx)
        ├─ 读取并合并配置（内联 options + skill-filter.json）
+       ├─ ctx.tool.transform(editor => editor.add(skills_list))   # 默认开启
        └─ ctx.skill.transform(editor => applyFilter(editor, rules))
             └─ 在 available_skills 组装前，把命中 hide 的 skill 设为 autoinvoke=false
 ```
@@ -118,13 +122,45 @@ editor.update(skillId, (skill) => {
 
 已经被设成目标值的 skill 会被优雅跳过，不产生冗余写入；修改过程通过 `console.debug` 记录，便于诊断。若宿主未提供 `editor.update`，插件会回退为直接修改 `editor.skills` 中的对象。
 
+## `skills_list` 工具
+
+插件在 setup 时通过 `ctx.tool.transform` 注册一个只读工具 `skills_list`：
+
+> 列出当前 OpenCode 加载的所有 Skills 以及它们的过滤/隐藏状态 (autoinvoke)
+
+它读取 `ctx.skill.list()`，统计每个 skill 的 `autoinvoke` 状态，并同时返回人可读文本与结构化 `metadata`：
+
+- `total`：全部 skill 数量
+- `active`：`autoinvoke !== false`（会出现在 `available_skills` 中）
+- `hidden`：`autoinvoke === false`（被本插件隐藏，仅能通过 `@name` 手动调用）
+- `skills`：按 `status` 过滤后的条目（含 `name` / `id` / `description` / `autoinvoke` / `hidden`）
+
+### 入参
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `status` | `"all" \| "active" \| "hidden"` | 可选，默认 `"all"`。`active` 只看可自动调用的，`hidden` 只看已被隐藏的；非法值回退为 `"all"` |
+
+`total` / `active` / `hidden` 始终基于全部 skill 统计，只有 `skills` 明细受 `status` 过滤。
+
+### 关闭工具
+
+若只想保留过滤能力、不希望向模型暴露查询工具，将 `exposeTool` 设为 `false` 即可：
+
+```jsonc
+{
+	"plugins": [
+		["@misakacloud/opencode-skill-filter@latest", { "exposeTool": false }]
+	]
+}
+```
+
 ## 开发
 
 ```bash
 bun install
 bun run typecheck    # tsc --noEmit
-bun run test         # bunx vitest run
-bun run test:watch   # bunx vitest
+bun test             # 运行全部测试
 ```
 
 ### 目录结构
@@ -141,6 +177,8 @@ src/
 │   └── rules.ts          # 优先级决策（hide/unhide/include/exclude）
 ├── filter/
 │   └── apply.ts          # SkillEditor 适配 + 应用过滤
+├── tool/
+│   └── skills-list.ts    # skills_list 工具定义 + 状态统计/格式化
 ├── utils/
 │   ├── paths.ts          # 全局/项目配置路径解析（XDG / HOME 隔离）
 │   └── logger.ts         # 统一前缀日志

@@ -9,12 +9,19 @@ import type { MutableSkill, SkillEditorLike } from "../src/filter/apply"
 interface CapturedCtx {
   ctx: any
   getCallback: () => ((editor: unknown) => void) | undefined
+  getTool: (name: string) => any
   transformCalls: number
+  toolTransformCalls: number
 }
 
-function createMockCtx(options: Record<string, unknown>, projectDir: string): CapturedCtx {
+function createMockCtx(
+  options: Record<string, unknown>,
+  projectDir: string,
+  skills: MutableSkill[] = [],
+): CapturedCtx {
   let callback: ((editor: unknown) => void) | undefined
-  const state = { transformCalls: 0 }
+  const state = { transformCalls: 0, toolTransformCalls: 0 }
+  const tools = new Map<string, any>()
   const ctx: any = {
     location: { directory: projectDir },
     options,
@@ -24,13 +31,43 @@ function createMockCtx(options: Record<string, unknown>, projectDir: string): Ca
         callback = cb
         return { dispose: async () => {} }
       },
+      list: async () => ({ location: { directory: projectDir }, data: skills }),
+      reload: async () => {},
+    },
+    tool: {
+      transform: async (cb: (editor: unknown) => void) => {
+        state.toolTransformCalls += 1
+        const editor = {
+          list: () => Array.from(tools.values()),
+          get: (id: string) => tools.get(id),
+          namespace: () => {},
+          add: (tool: any) => {
+            tools.set(tool.name, tool)
+          },
+          update: (id: string, updater: (tool: any) => void) => {
+            const target = tools.get(id)
+            if (target) updater(target)
+          },
+          remove: (id: string) => {
+            tools.delete(id)
+          },
+        }
+        cb(editor)
+        return { dispose: async () => {} }
+      },
+      list: async () => Array.from(tools.values()),
+      reload: async () => {},
     },
   }
   return {
     ctx,
     getCallback: () => callback,
+    getTool: (name: string) => tools.get(name),
     get transformCalls() {
       return state.transformCalls
+    },
+    get toolTransformCalls() {
+      return state.toolTransformCalls
     },
   } as CapturedCtx
 }
@@ -164,5 +201,97 @@ describe("plugin setup", () => {
     const captured = createMockCtx({ hide: "nope", configPath: false }, projectDir)
     await expect(SkillFilterPlugin.setup(captured.ctx)).resolves.toBeUndefined()
     expect(captured.transformCalls).toBe(0)
+  })
+})
+
+describe("skills_list tool registration", () => {
+  let root: string
+  let projectDir: string
+  let home: string
+  const prevHome = process.env.OPENCODE_TEST_HOME
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "skill-filter-tool-"))
+    projectDir = path.join(root, "project")
+    home = path.join(root, "home")
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.mkdir(path.join(home, ".config", "opencode"), { recursive: true })
+    process.env.OPENCODE_TEST_HOME = home
+  })
+
+  afterEach(async () => {
+    if (prevHome === undefined) {
+      delete process.env.OPENCODE_TEST_HOME
+    } else {
+      process.env.OPENCODE_TEST_HOME = prevHome
+    }
+    await fs.rm(root, { recursive: true, force: true })
+  })
+
+  it("registers skills_list through ctx.tool.transform by default", async () => {
+    const captured = createMockCtx({ configPath: false }, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    expect(captured.toolTransformCalls).toBe(1)
+    const tool = captured.getTool("skills_list")
+    expect(tool).toBeDefined()
+    expect(tool.description).toContain("autoinvoke")
+    expect(tool.input.type).toBe("object")
+  })
+
+  it("registers the tool even when no hide rules are configured", async () => {
+    const captured = createMockCtx({ configPath: false }, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+    // 没有 hide 规则 → 不注册 skill transform，但工具仍应可用。
+    expect(captured.transformCalls).toBe(0)
+    expect(captured.getTool("skills_list")).toBeDefined()
+  })
+
+  it("does not register the tool when exposeTool is false", async () => {
+    const captured = createMockCtx({ configPath: false, exposeTool: false }, projectDir)
+    await SkillFilterPlugin.setup(captured.ctx)
+    expect(captured.toolTransformCalls).toBe(0)
+    expect(captured.getTool("skills_list")).toBeUndefined()
+  })
+
+  it("skills_list execute reports totals and honours the status filter", async () => {
+    const captured = createMockCtx({ configPath: false }, projectDir, [
+      { id: "alpha", name: "alpha", description: "first", autoinvoke: true },
+      { id: "beta", name: "beta", autoinvoke: false },
+      { id: "gamma", name: "gamma" },
+    ])
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const tool = captured.getTool("skills_list")
+    const result = await tool.execute({ status: "all" }, {})
+
+    expect(result.metadata.total).toBe(3)
+    expect(result.metadata.active).toBe(2)
+    expect(result.metadata.hidden).toBe(1)
+    expect(result.content[0].type).toBe("text")
+    expect(result.content[0].text).toContain("total=3")
+    expect(result.content[0].text).toContain("[hidden] beta")
+
+    const hiddenOnly = await tool.execute({ status: "hidden" }, {})
+    expect(hiddenOnly.metadata.status).toBe("hidden")
+    expect(hiddenOnly.metadata.skills.map((entry: { name: string }) => entry.name)).toEqual(["beta"])
+
+    const activeOnly = await tool.execute({ status: "active" }, {})
+    expect(activeOnly.metadata.skills.map((entry: { name: string }) => entry.name)).toEqual([
+      "alpha",
+      "gamma",
+    ])
+  })
+
+  it("skills_list execute defaults to all on unknown status", async () => {
+    const captured = createMockCtx({ configPath: false }, projectDir, [
+      { id: "alpha", name: "alpha" },
+      { id: "beta", name: "beta", autoinvoke: false },
+    ])
+    await SkillFilterPlugin.setup(captured.ctx)
+
+    const result = await captured.getTool("skills_list").execute({ status: "bogus" }, {})
+    expect(result.metadata.status).toBe("all")
+    expect(result.metadata.skills).toHaveLength(2)
   })
 })

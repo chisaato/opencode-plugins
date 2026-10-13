@@ -65,6 +65,14 @@ export function normalizeConfig(raw: unknown, source: string): SkillFilterConfig
     }
   }
 
+  if (raw.exposeTool !== undefined) {
+    if (typeof raw.exposeTool === "boolean") {
+      config.exposeTool = raw.exposeTool
+    } else {
+      warnInvalid(source, "exposeTool", "boolean")
+    }
+  }
+
   if (typeof raw.configPath === "string" || raw.configPath === false) {
     config.configPath = raw.configPath
   }
@@ -112,6 +120,10 @@ export function mergeConfigs(
   const debug = inlineConfig.debug ?? fileConfig.debug
   if (debug !== undefined) {
     merged.debug = debug
+  }
+  const exposeTool = inlineConfig.exposeTool ?? fileConfig.exposeTool
+  if (exposeTool !== undefined) {
+    merged.exposeTool = exposeTool
   }
   const configPath = inlineConfig.configPath ?? fileConfig.configPath
   if (configPath !== undefined) {

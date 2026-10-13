@@ -30,6 +30,8 @@ src/
 │   └── rules.ts          # decideAction：unhide > exclude > include > hide
 ├── filter/
 │   └── apply.ts          # SkillEditor 适配 + collectSkills + applyFilter
+├── tool/
+│   └── skills-list.ts    # skills_list 工具：ctx.skill.list() → 状态统计/格式化
 ├── utils/
 │   ├── paths.ts          # 全局/项目配置路径解析（XDG / HOME 隔离）
 │   └── logger.ts         # 统一前缀日志（默认 console.debug）
@@ -43,6 +45,7 @@ src/
 - **真实 API 是 `editor.list()/update()`，不是 `editor.skills`**：`collectSkills` 优先用 `list()`，并回退兼容 `skills` 记录/数组形态；写入优先 `update(id, cb)`，不可用时回退就地修改。
 - **优雅改写**：已是目标值的 skill 跳过，不产生冗余写入；修改统一走 `console.debug` 日志。
 - **无第三方运行时依赖**：glob 匹配自实现，唯一依赖是 `@opencode/plugin`。
+- **`skills_list` 工具**：setup 中通过 `ctx.tool.transform(editor => editor.add(...))` 注册，默认开启（`exposeTool: false` 可关闭）；入参用纯 JSON Schema，避免引入 effect 依赖；execute 读取 `ctx.skill.list()` 返回文本 + 结构化 `metadata`。工具注册独立于 hide 规则，无过滤配置时也生效。
 
 ## 配置示例
 
