@@ -25,6 +25,8 @@ export const SkillFilterPlugin = Plugin.define({
     const inline = ctx.options as Record<string, unknown> | undefined
 
     const { rules, debug, exposeTool, sources } = await loadConfig({ projectDirectory, inline })
+    console.log("[skill-filter] setup running for directory:", projectDirectory)
+    console.log("[skill-filter] parsed rules:", JSON.stringify(rules))
     const logger = createLogger(debug)
 
     if (sources.length > 0) {
@@ -71,6 +73,7 @@ export const SkillFilterPlugin = Plugin.define({
     // 注册 V2 skill transform：宿主在组装 available_skills 之前调用回调，
     // 我们在其中同步改写 autoinvoke 或移除 skill。
     await ctx.skill.transform((editor) => {
+      console.log("[skill-filter] ctx.skill.transform invoked! editor:", typeof editor)
       const result = applyFilter(editor as unknown as SkillEditorLike, rules, logger, {
         onRemove: (skill, label) => {
           removedSkills.set(label, {
