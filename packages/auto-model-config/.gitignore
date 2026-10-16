@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+*.tsbuildinfo
+*.pid
+.cache/
+coverage/
+opencode-expanded.json
+*.local.json

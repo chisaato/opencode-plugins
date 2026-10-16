@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@misakacloud/opencode-auto-model-config",
+  "version": "1.1.0",
+  "description": "OpenCode plugin: auto-fill model metadata from models.dev for custom providers",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "index.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bunx vitest run",
+    "smoke:cli": "bun run test/smoke/opencode-cli.smoke.ts",
+    "build": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "models.dev",
+    "model-config",
+    "metadata"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chisaato/opencode-auto-model-config.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@opencode/plugin": "2.0.16"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.6.0",
+    "eslint": "^10.2.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -1,0 +1,67 @@
+name: Publish to NPM
+
+on:
+  # 推送 tag 时自动触发（格式：v1.0.0, v0.2.1-beta 等）
+  push:
+    tags:
+      - "v*"
+  # 也支持手动触发，方便测试
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (不实际发布)"
+        required: false
+        default: false
+        type: boolean
+permissions:
+  id-token: write # Required for OIDC
+  contents: read
+# 同一时间只允许一个发布任务
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          registry-url: "https://registry.npmjs.org"
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Use latest npm
+        run: npm install -g npm@latest
+
+      - name: Publish to NPM
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "=== Dry Run Mode ==="
+            bun pm pack --dry-run
+          else
+            npm publish --access public
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 发布结果" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "✅ Dry run 完成，未实际发布" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ job.status }}" = "success" ]; then
+            echo "✅ 发布成功" >> $GITHUB_STEP_SUMMARY
+            echo "版本: $(jq -r '.version' package.json)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ 发布失败" >> $GITHUB_STEP_SUMMARY
+          fi

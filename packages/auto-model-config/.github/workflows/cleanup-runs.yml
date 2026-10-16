@@ -1,0 +1,121 @@
+name: Cleanup Old Workflow Runs
+
+on:
+  workflow_dispatch:
+    inputs:
+      days_to_keep:
+        description: '保留最近 N 天的 runs'
+        required: false
+        default: '30'
+        type: string
+      delete_artifacts:
+        description: '同时删除关联的 artifacts'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Delete old workflow runs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const daysToKeep = parseInt('${{ inputs.days_to_keep }}') || 30;
+            const deleteArtifacts = ${{ inputs.delete_artifacts }};
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+
+            console.log(`删除 ${daysToKeep} 天前的 workflow runs (before ${cutoffDate.toISOString()})`);
+
+            let totalDeleted = 0;
+            let totalSkipped = 0;
+
+            // 获取所有 workflows
+            const workflows = await github.paginate(
+              github.rest.actions.listRepoWorkflows,
+              { owner: context.repo.owner, repo: context.repo.repo }
+            );
+
+            for (const workflow of workflows) {
+              console.log(`\n处理 workflow: ${workflow.name} (ID: ${workflow.id})`);
+
+              // 获取该 workflow 的所有 runs
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRuns,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: workflow.id,
+                  created: `<${cutoffDate.toISOString()}`,
+                  per_page: 100
+                }
+              );
+
+              console.log(`  找到 ${runs.length} 个过期 runs`);
+
+              for (const run of runs) {
+                // 跳过正在进行的 run
+                if (run.status === 'in_progress' || run.status === 'queued') {
+                  console.log(`  跳过 #${run.run_number} (状态: ${run.status})`);
+                  totalSkipped++;
+                  continue;
+                }
+
+                try {
+                  // 删除关联的 artifacts
+                  if (deleteArtifacts) {
+                    const artifacts = await github.paginate(
+                      github.rest.actions.listWorkflowRunArtifacts,
+                      {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        run_id: run.id
+                      }
+                    );
+
+                    for (const artifact of artifacts) {
+                      await github.rest.actions.deleteArtifact({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        artifact_id: artifact.id
+                      });
+                    }
+                  }
+
+                  // 删除 run
+                  await github.rest.actions.deleteWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: run.id
+                  });
+
+                  console.log(`  删除 #${run.run_number} (${run.created_at})`);
+                  totalDeleted++;
+                } catch (error) {
+                  console.error(`  删除 #${run.run_number} 失败: ${error.message}`);
+                }
+              }
+            }
+
+            console.log(`\n=== 完成 ===`);
+            console.log(`删除: ${totalDeleted} 个 runs`);
+            console.log(`跳过: ${totalSkipped} 个 runs`);
+
+            // 输出到 summary
+            const summary = `## Workflow Runs 清理结果\n\n` +
+              `- 保留天数: ${daysToKeep}\n` +
+              `- 删除 artifacts: ${deleteArtifacts ? '是' : '否'}\n` +
+              `- 删除 runs: ${totalDeleted}\n` +
+              `- 跳过 runs: ${totalSkipped}\n` +
+              `- 截止日期: ${cutoffDate.toISOString()}`;
+
+            await require('fs').promises.appendFile(
+              process.env.GITHUB_STEP_SUMMARY,
+              summary
+            );
