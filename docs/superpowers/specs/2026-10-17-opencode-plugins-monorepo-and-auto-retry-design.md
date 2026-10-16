@@ -58,10 +58,13 @@
       // 以下可省略,省略则使用 defaults
       "prompt": "继续",
       "maxRetries": 3,
-      "delayMs": 2000
+      "delayMs": 2000,
+      // 失败之间取得多少推进才把计数清零(满足任一即可)
+      "resetAfterToolCalls": 10,
+      "resetAfterMs": 120000
     }
   ],
-  "defaults": { "prompt": "继续", "maxRetries": 3, "delayMs": 2000 }
+  "defaults": { "prompt": "继续", "maxRetries": 3, "delayMs": 2000, "resetAfterToolCalls": 10, "resetAfterMs": 120000 }
 }
 ```
 
@@ -71,7 +74,12 @@
 - 支持按模型覆盖:不同规则可使用不同 `prompt` / `maxRetries` / `delayMs`。
 
 ### 3.3 熔断与防重
-- 计数的是**连续失败**,按 "sessionID + 规则" 分别记录:只要两次失败之间有任意一个正常完成的 step(`session.step.ended` 且无 error、`finish` 非 `content-filter`),计数就清零。Gemini 可能跑两三段就失败一次,也可能长时间不失败,因此不使用累计计数或时间窗口;只有“续写后马上又被拦截”才会逐次累加并最终熔断。
+- 计数的是**未取得足够推进的连续失败**,按 "sessionID + 规则" 分别记录。每次失败发生时,先结算"上一次失败/续写之后"这段时间的推进量:
+  - 工具调用数 ≥ `resetAfterToolCalls`(默认 10),或持续运行时间 ≥ `resetAfterMs`(默认 120000)→ 计数先清零,再把这次失败记为第 1 次;
+  - 否则计数继续累加(例如上限 5,模型每次只走三步就失败,则逐次累计直到熔断)。
+  - 模型正常结束(`finish: "stop"`)视为完整清零。
+  - 工具调用数优先读取真实的工具事件;如果事件类型里没有可用的工具调用事件,则以 `finish: "tool-calls"` 结束的 step 数近似(会少算并行调用,偏保守)。`finish: "content-filter"` / `"error"` 的 step 不计入推进量。
+  - 两个阈值是我的猜测默认值,规则内可覆盖。
 - 超过 `maxRetries`:停止重试,保留原始错误,弹一条提示说明已放弃。
 - 同一失败的重复事件(`session.step.failed`、`session.execution.failed` 可能连发)只处理一次:按会话加锁/防抖。
 
@@ -126,7 +134,7 @@ opencode-plugins/
 - **不设共享包**(用户指出公共代码很简单):各包自带副本。第 4.1 节结构以此为准。
 - **发送动作**:`ctx.session.prompt({ sessionID, text })`,`delivery` 默认。失败时会话已空闲,不需要等待空闲;仍需用真实 OpenCode 验证。
 - **模型匹配**(用户确认):OpenCode 在一轮运行期间不会因为会话模型被改动而换模型,失败正是由该轮正在使用的模型产生的。因此匹配和续写都使用产生失败的那个模型;匹配时取失败消息(`assistantMessageID`)所属请求的模型,取不到才回退 `session.get().model`,都取不到则视为不命中。若 `prompt` 接口无法指定模型,则接受使用会话当前模型,这一点由实现者核实后写进文档。
-- **计数**:见 3.3,连续失败 + 有进展即清零。
+- **计数**:见 3.3,按推进量(工具调用数或运行时间)判断是否清零,不再是“任意一步成功就清零”。
 - **中断**:见 3.1,无待发状态,无需取消逻辑。
 - **消息形态**:续写是普通可见的用户消息(`prompt`),不走 synthetic,让用户能看到并介入。
 - **测试**:全仓统一用 vitest,skill-filter 的 `bun:test` 用例随迁移改写;CI 只跑 typecheck 和单元测试,真实 OpenCode 的 smoke 用例不进 CI,只保留为本地手动脚本。

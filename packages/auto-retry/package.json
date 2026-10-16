@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@misakacloud/opencode-auto-retry",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin: continue a session when a configured provider content-filter error occurs",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "index.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "auto-retry"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chisaato/opencode-plugins.git",
+    "directory": "packages/auto-retry"
+  },
+  "author": "chisaato",
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.16"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.0.16",
+    "@types/bun": "latest",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

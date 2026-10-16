@@ -1,4 +1,4 @@
-# opencode-skill-filter
+# @misakacloud/opencode-skill-filter
 
 OpenCode V2 的 **Skill 治理核心引擎**：对加载的 skill 做**双管齐下**的治理——运行时把多余或相互冲突的 skill **软隐藏**（`autoinvoke: false`）或**彻底掩埋**（从运行时注册表移除），同时把 `remove` 规则自动同步为**内核级 Policy**，让内核在内置的 `ConfigPolicyPlugin` 里于**所有插件之后**把命中的 skill 物理拔除。即便兼容层插件在重载时再次注入这些技能，也会被再次剔除。
 
@@ -309,7 +309,7 @@ opencode 启动
 ```bash
 bun install
 bun run typecheck    # tsc --noEmit
-bun test             # 运行全部测试（vitest）
+bun run test         # 运行全部测试（vitest run）
 ```
 
 ### 目录结构

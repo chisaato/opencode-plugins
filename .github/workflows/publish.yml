@@ -1,0 +1,201 @@
+name: Publish to NPM
+
+on:
+  push:
+    tags:
+      - "*@*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "要发布的包目录名(packages/ 下,例如 auto-retry)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run (不实际发布)"
+        required: false
+        default: false
+        type: boolean
+
+# 默认不含 id-token;只有 publish job 申请 OIDC
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      dir: ${{ steps.target.outputs.dir }}
+      version: ${{ steps.target.outputs.version }}
+      prerelease: ${{ steps.target.outputs.prerelease }}
+      npmTag: ${{ steps.target.outputs.npmTag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check commit is on main
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "找不到 origin/main,无法确认 ${GITHUB_SHA} 是否在主分支历史上" >&2
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "提交 ${GITHUB_SHA} 是 origin/main 的祖先,允许继续"
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "::warning::提交 ${GITHUB_SHA} 不是 origin/main 的祖先。dry run 仅警告,不阻断。"
+            echo "警告: 提交 ${GITHUB_SHA} 不是 origin/main 的祖先,dry run 继续" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "拒绝发布: 提交 ${GITHUB_SHA} 不是 origin/main 的祖先。请把 tag 打在已进入 main 的提交上。" >&2
+            exit 1
+          fi
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+      - name: Resolve publish target
+        id: target
+        env:
+          INPUT_PACKAGE: ${{ inputs.package }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [[ ! "$INPUT_PACKAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "解析发布目标失败: package 不是 packages/ 下的单段目录名: ${INPUT_PACKAGE}" >&2
+              exit 1
+            fi
+            pkg_json="packages/${INPUT_PACKAGE}/package.json"
+            if [ ! -f "$pkg_json" ]; then
+              echo "解析发布目标失败: 未知目录 packages/${INPUT_PACKAGE} 不存在" >&2
+              exit 1
+            fi
+            version="$(jq -r '.version' "$pkg_json")"
+            if [ -z "$version" ] || [ "$version" = "null" ]; then
+              echo "解析发布目标失败: ${pkg_json} 缺少 version" >&2
+              exit 1
+            fi
+            tag="${INPUT_PACKAGE}@${version}"
+          else
+            tag="$REF_NAME"
+          fi
+          echo "正在解析发布 tag: ${tag}"
+          if ! bun scripts/resolve-publish-target.ts "$tag"; then
+            echo "解析发布 tag 失败: ${tag}" >&2
+            exit 1
+          fi
+
+      - name: Verify version
+        env:
+          DIR: ${{ steps.target.outputs.dir }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          if [[ ! "$DIR" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "解析发布目标失败: 未知目录 ${DIR}" >&2
+            exit 1
+          fi
+          actual="$(jq -r '.version' "packages/${DIR}/package.json")"
+          if [ "$actual" != "$VERSION" ]; then
+            echo "版本不一致: packages/${DIR}/package.json 为 ${actual}, tag 为 ${VERSION}" >&2
+            exit 1
+          fi
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v6
+        with:
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Use latest npm
+        run: npm install -g npm@latest
+
+      - name: Publish to NPM
+        env:
+          DIR: ${{ needs.verify.outputs.dir }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          NPM_TAG: ${{ needs.verify.outputs.npmTag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [[ ! "$DIR" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "拒绝发布: 未知目录 ${DIR}" >&2
+            exit 1
+          fi
+          cd "packages/${DIR}"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "=== Dry Run Mode ==="
+            bun pm pack --dry-run
+          elif [ "$NPM_TAG" = "next" ]; then
+            npm publish --access public --tag next
+          elif [ "$NPM_TAG" = "latest" ]; then
+            npm publish --access public
+          else
+            echo "拒绝发布: 无法识别的 npm dist-tag: ${NPM_TAG}" >&2
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          DIR: ${{ needs.verify.outputs.dir }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          NPM_TAG: ${{ needs.verify.outputs.npmTag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "## 发布结果"
+            if [[ "$DIR" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ -f "packages/${DIR}/package.json" ]; then
+              name="$(jq -r '.name' "packages/${DIR}/package.json")"
+              echo "包名: ${name}"
+            fi
+            if [ -n "$VERSION" ]; then
+              echo "版本: ${VERSION}"
+            fi
+            if [ -n "$NPM_TAG" ]; then
+              echo "dist-tag: ${NPM_TAG}"
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "Dry run 完成,未实际发布"
+            elif [ "${{ job.status }}" = "success" ]; then
+              echo "发布成功"
+            else
+              echo "发布失败"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

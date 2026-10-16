@@ -1,4 +1,4 @@
-# opencode-skill-filter
+# @misakacloud/opencode-skill-filter
 
 OpenCode V2 的 Skill 治理插件：按规则对 skill 做**双管齐下**的治理——运行时 `hide` 软隐藏（设 `autoinvoke: false`，从模型 `available_skills` 摘除，仍可 `@name` 手动调用）、`remove` 硬剔除（`editor.remove(id)`，从运行时注册表彻底拔除）、`enable` 显式激活；同时把 `remove` 规则自动同步为**内核级 Policy**（写入 `experimental.policies`），让内核末端的 `ConfigPolicyPlugin` 在下一次启动时、于**所有插件之后**把命中的技能物理拔除。
 
@@ -26,7 +26,7 @@ OpenCode V2 的 Skill 治理插件：按规则对 skill 做**双管齐下**的�
 
 ```bash
 bun run typecheck    # tsc --noEmit（无 build 步骤，OpenCode 直接加载 TS）
-bun test             # 运行全部测试（vitest）
+bun run test         # 运行全部测试（vitest run）
 bunx vitest          # watch 模式
 ```
 

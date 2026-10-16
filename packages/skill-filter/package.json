@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode-skill-filter",
+  "name": "@misakacloud/opencode-skill-filter",
   "version": "0.1.0",
   "description": "OpenCode V2 plugin: filter and hide unwanted skills to prevent context bloat and prompt conflicts",
   "type": "module",
@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "vitest run",
     "build": "tsc --noEmit"
   },
   "keywords": [
@@ -27,7 +27,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chisaato/opencode-skill-filter.git"
+    "url": "git+https://github.com/chisaato/opencode-plugins.git",
+    "directory": "packages/skill-filter"
   },
   "author": "chisaato",
   "license": "MIT",
@@ -39,5 +40,9 @@
     "@types/node": "^25.6.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

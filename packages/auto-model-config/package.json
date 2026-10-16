@@ -29,7 +29,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chisaato/opencode-auto-model-config.git"
+    "url": "git+https://github.com/chisaato/opencode-plugins.git",
+    "directory": "packages/auto-model-config"
   },
   "author": "",
   "license": "MIT",

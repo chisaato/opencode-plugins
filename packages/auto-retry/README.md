@@ -1,0 +1,96 @@
+# @misakacloud/opencode-auto-retry
+
+OpenCode V2 插件：当模型因内容拦截（`provider.content-filter`，常见文案 “Provider blocked the response”）停下时，按配置向该会话发一条可见的续写消息，例如“继续”。
+
+只支持 OpenCode V2（`@opencode/plugin` 2.x）。内容拦截不在内核的可重试错误里，所以本插件自己订阅失败事件，不使用 `session.hook("retry")`。
+
+## 安装
+
+在 `opencode.json` / `opencode.jsonc` 里声明插件（建议锁定版本）：
+
+```jsonc
+{
+  "plugins": ["@misakacloud/opencode-auto-retry@0.1.0"]
+}
+```
+
+## 配置
+
+独立的 JSONC 文件，不写进 `opencode.json`。
+
+- 全局：`~/.config/opencode/auto-retry.jsonc`（`homeDir` / `OPENCODE_TEST_HOME` / `XDG_CONFIG_HOME` 的解析方式与其它插件一致）
+- 项目：`<项目>/.opencode/auto-retry.jsonc`
+
+项目文件如果写了 `rules`（包括空数组），会**整体替换**全局 `rules`，不逐条合并。项目文件没有 `rules` 键时，沿用全局规则。`enabled` 和 `defaults` 是项目覆盖全局，没写则沿用上一层。
+
+没有配置文件、`rules` 为空、`enabled: false`，或者没有任何一条规则命中时，插件完全不响应。没有内置的默认触发规则。
+
+```jsonc
+{
+  "enabled": true,
+  // 从上到下匹配，第一条同时命中的生效
+  "rules": [
+    {
+      // 必填：provider/model，支持 * 通配
+      "models": ["google/*"],
+      // 必填：错误文案子串；和 models 都命中才处理
+      "errors": ["Provider blocked the response"],
+      // 下面可以省略，省略则用 defaults
+      "prompt": "继续",
+      "maxRetries": 3,
+      "delayMs": 2000,
+      // 失败之间取得多少推进才把连续失败清零，满足任一即可
+      "resetAfterToolCalls": 10,
+      "resetAfterMs": 120000
+    }
+  ],
+  "defaults": {
+    "prompt": "继续",
+    "maxRetries": 3,
+    "delayMs": 2000,
+    "resetAfterToolCalls": 10,
+    "resetAfterMs": 120000
+  }
+}
+```
+
+缺 `models` 或 `errors` 的规则会被丢掉，并打一条 `[auto-retry]` 警告，不会因此匹配所有模型。`prompt` 默认“继续”，`maxRetries` 默认 3，`delayMs` 默认 2000，可以是 0。`resetAfterToolCalls` 默认 10，`resetAfterMs` 默认 120000，都必须是正整数；写成 0、负数或小数会回退默认值并警告。
+
+## 行为
+
+1. 只看 `error.type === "provider.content-filter"` 的 `session.step.failed` 和 `session.execution.failed`。其它错误即使文案撞上 `errors` 也不处理。用户中断（`session.execution.interrupted`）不是失败，不续写；如果中断发生在 `delayMs` 等待期间，这次待发的续写也会取消。
+2. 模型用失败助手消息上的 `providerID/id`（不含 variant）。事件没有这条消息、或消息上还没有模型时，回退到 `session.get().model`。都没有则视为不命中。不用 `session.step.started` 上的模型。
+3. `models` 里任意一个通配命中，且 `errors` 里任意一个是错误文案的子串，才算命中。多条规则从上到下，用第一条。
+4. 失败时会话已经空闲，插件不维护“等空闲再发”的状态。发送前先等 `delayMs`（用来并住连发的失败事件，并留出复查窗口），再看失败之后有没有新的用户消息；有就跳过。
+5. 同一会话第一次接手失败事件（`step.failed` 或 `execution.failed`，谁先到算谁）后先闩上。闩着的时候，这个会话后续的失败事件全部忽略。下一个 `session.step.started`，或 `finish` 为 `stop` / `tool-calls` / `length` 的 `session.step.ended`，才把闩打开。
+6. 计数的是「没有取得足够推进的连续失败」，按会话 + 规则分开。每次失败先结算上一次失败之后的推进量：`session.tool.called` 的次数 ≥ `resetAfterToolCalls`，或**累计运行时长** ≥ `resetAfterMs`，就把该规则的计数清零，再把这次记成第 1 次；否则继续累加。运行时长只累加已经收口的 step：从 `session.step.started` 到 `finish` 为 `stop` / `tool-calls` / `length` 的 `ended`，以及内容拦截的 `step.failed`（失败的那一步也算）。`aborted` 等非拦截失败、`session.execution.interrupted`、`finish: "unknown"` 会丢掉尚未关闭的计时，不把这一步以及之后的空闲算进去。`delayMs`、空闲、用户离开的墙钟时间不算。同一个工具 id 只计一次，记住的 id 超过 1000 个就丢掉最旧的。`finish: "stop"` 把该会话的计数和推进量整段清掉。`finish` 为 `content-filter` 或 `error` 的 step 不计入推进量，`tool-calls` / `length` 只开闩、不清计数。
+7. 连续失败次数超过 `maxRetries` 后停止发送，原始错误留在会话里，并打出一次警告。同一轮超限只提示一次，直到计数被 `stop` 或足够的推进量清零。
+8. 主会话和子会话（带 `parentID`）同样处理。已知风险：父任务可能已经把子任务判失败，续写会造成状态不一致。这个风险是接受的。
+
+续写走 `ctx.session.prompt({ sessionID, text })`，是一条普通可见的用户消息，不走 synthetic。
+
+## 已知限制
+
+- **不能指定续写所用的模型。** `@opencode/plugin@2.0.16` 的 `SessionPromptInput` 只有 `sessionID`、`text`、附件、`metadata`、`delivery`、`resume`，没有 `model`。续写使用会话当前模型。OpenCode 在一轮运行里不会中途换模型，失败模型通常仍是会话模型；若在 `delayMs` 期间手动换了会话模型，续写会用新的那个。
+- **超限提示只能写日志。** V2 的 promise 插件 `Context` 没有 toast / notify 通道。超限时调用 `console.warn`，前缀 `[auto-retry]`。TUI 的 `toast.show` 属于另一类 `@opencode/plugin/tui` 插件，这个包没有接。
+- **事件类型是手写的结构类型，再在插件入口做类型断言。** `ObservedEvent` 不是从 `@opencode/plugin` 生成出来的。真实事件字段以后若改名或改形状，编译器不会报警，要靠实测或对照类型声明才能发现。
+- 模型通配按 `providerID/id` 匹配，忽略 variant（`provider/model#variant` 里的 `#variant`）。
+- 只处理 `provider.content-filter`。配置里的 `errors` 是在这个类型之内再按文案过滤，不能拿来重试限流或网络错误。`step.failed` 上 `error.type === "aborted"`（例如 “Step interrupted”）不续写。
+- **工具调用数来自 `session.tool.called`，不拿 `finish: "tool-calls"` 的 step 数做近似。** `@opencode/plugin@2.0.16` 和当前源码都有这个事件，payload 里有每次调用的 `id`。并行调用各有各的 id，会分别计数。`executed` 字段的语义还没在真实运行里核实，目前只要发出 `session.tool.called` 就计入推进量，不区分有没有真正执行。如果某次运行没发出这个事件，推进量会偏少，阈值更难达到（偏保守，不会因此过早清零）。
+- **没有总重试上限。** 熔断只看「没有足够推进的连续失败」。如果模型每次被拦截之前，都已经调用了不少于 `resetAfterToolCalls` 次工具，或者累计运行不少于 `resetAfterMs`，会被当成有推进，计数清零后重新从 1 开始，于是一直不熔断。
+- 事件的 `created` 是毫秒时间戳（`Clock.currentTimeMillis`）。早于插件开始订阅的失败当成历史回放丢掉。`session.deleted` 会清掉该会话在插件里的计数和推进量。
+- 读取失败所属模型用的是 `ctx.session.context()` 返回的消息（助手消息上的 `model`），不是单独的 `message.list`。插件 `SessionDomain` 没有暴露 `message.list`。`execution.failed` 不带 `assistantMessageID`，这时直接回退会话模型。
+- **下列行为没有在真实 OpenCode 进程里确认过**，单元测试只覆盖了我们假定的事件形态：
+  1. `session.step.failed` 之后，内核还会不会再补发一条 `session.step.ended`。
+  2. `session.step.failed` 和 `session.execution.failed` 的实际到达顺序，以及事件到达时 `session.context()` 里是否已经有这条失败助手消息。
+  3. 消息的 `time.created` / `time.completed` 和事件的 `created` 是否同一时钟，复查“失败之后的新用户消息”才靠得住。
+  4. 失败发生后立刻调用 `session.prompt` 是否一定会被接受（会话是否真的已经空闲）。
+  5. 用户中断是否除了 `session.execution.interrupted` 之外，还会再产生一条 `error.type === "aborted"` 的 `session.step.failed`。
+  6. 子会话（带 `parentID`）失败时是否发出和主会话一样的 `step.failed` / `execution.failed`。
+
+## 开发
+
+```sh
+bunx vitest run
+bun run typecheck
+```
