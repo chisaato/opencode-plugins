@@ -1,5 +1,65 @@
-import type { ModelsDevData, AutoModelConfig, ResolvedModel } from "../types"
+import type { ModelsDevData, ModelsDevModel, AutoModelConfig, ResolvedModel } from "../types"
 import { fieldsFromModelsDev } from "../utils/fields-mapper"
+
+export interface SourceTarget {
+  source: string
+  modelData: ModelsDevModel | null
+  warning?: string
+}
+
+/**
+ * 解析显式的 "provider/modelId" 目标。
+ * 先精确匹配，再大小写不敏感匹配 key 与条目 id。不做别名或模糊猜测。
+ * metadata mapping 与 costMapping 共用这一查找，填充策略仍各自分开。
+ */
+export function resolveSourceTarget(modelsDev: ModelsDevData, target: string): SourceTarget {
+  const source = target
+  const slashIndex = target.indexOf("/")
+  if (slashIndex === -1) {
+    return {
+      source,
+      modelData: null,
+      warning: `Invalid mapping format "${target}" — expected "provider/modelId"`,
+    }
+  }
+
+  const targetProvider = target.slice(0, slashIndex)
+  const targetModelId = target.slice(slashIndex + 1)
+  const providerData = modelsDev[targetProvider]
+  if (!providerData) {
+    return {
+      source,
+      modelData: null,
+      warning: `Provider "${targetProvider}" not found in models.dev data`,
+    }
+  }
+
+  let modelData = providerData.models[targetModelId]
+  if (!modelData) {
+    const lowerTarget = targetModelId.toLowerCase()
+    for (const key of Object.keys(providerData.models)) {
+      if (key.toLowerCase() === lowerTarget) {
+        modelData = providerData.models[key]
+        break
+      }
+      const entry = providerData.models[key]
+      if (entry.id?.toLowerCase() === lowerTarget) {
+        modelData = entry
+        break
+      }
+    }
+  }
+
+  if (!modelData) {
+    return {
+      source,
+      modelData: null,
+      warning: `Model "${targetModelId}" not found in provider "${targetProvider}"`,
+    }
+  }
+
+  return { source, modelData }
+}
 
 /**
  * 解析单个模型映射：在 models.dev 数据中查找目标 provider/model，
@@ -17,66 +77,22 @@ export function resolveModel(
   const target = providerMapping[modelId]
   if (!target) return null
 
-  const source = target
-
-  // 解析 "provider/modelId" 格式
-  const slashIndex = target.indexOf("/")
-  if (slashIndex === -1) {
+  const lookedUp = resolveSourceTarget(modelsDev, target)
+  if (lookedUp.warning || !lookedUp.modelData) {
     return {
-      source,
+      source: lookedUp.source,
       modelData: {} as any,
       filledFields: [],
-      warning: `Invalid mapping format "${target}" — expected "provider/modelId"`,
+      warning: lookedUp.warning,
     }
   }
 
-  const targetProvider = target.slice(0, slashIndex)
-  const targetModelId = target.slice(slashIndex + 1)
-
-  // 查找 provider
-  const providerData = modelsDev[targetProvider]
-  if (!providerData) {
-    return {
-      source,
-      modelData: {} as any,
-      filledFields: [],
-      warning: `Provider "${targetProvider}" not found in models.dev data`,
-    }
-  }
-
-  // 查找模型 — 先尝试精确匹配，再进行大小写不敏感匹配
-  let modelData = providerData.models[targetModelId]
-  if (!modelData) {
-    // 大小写不敏感搜索
-    const lowerTarget = targetModelId.toLowerCase()
-    for (const key of Object.keys(providerData.models)) {
-      if (key.toLowerCase() === lowerTarget) {
-        modelData = providerData.models[key]
-        break
-      }
-      // 同时检查模型内部的 id 字段
-      const m = providerData.models[key]
-      if (m.id?.toLowerCase() === lowerTarget) {
-        modelData = m
-        break
-      }
-    }
-  }
-
-  if (!modelData) {
-    return {
-      source,
-      modelData: {} as any,
-      filledFields: [],
-      warning: `Model "${targetModelId}" not found in provider "${targetProvider}"`,
-    }
-  }
-
+  const modelData = lookedUp.modelData
   const configFields = fieldsFromModelsDev(modelData)
   const filledFields = Object.keys(configFields)
 
   return {
-    source,
+    source: lookedUp.source,
     modelData,
     filledFields,
   }

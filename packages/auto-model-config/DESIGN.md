@@ -66,12 +66,15 @@ setup(ctx):
   4. ctx.model.transform(editor => ...) 注册同步增强回调
 
 transform(editor):
-  对每个已解析的 provider/model：
+  对每个已解析的 mapping provider/model：
     ├── editor.provider.get(providerID) 不存在 → 跳过
     ├── editor.get(providerID, modelID) 不存在 → 标记 skipped
     └── editor.update(providerID, modelID, m => ...)
           仅补全仍等于 Model.Info.default 初始值的字段
           保留用户显式覆盖值
+          override.cost === true 时，仅这一路强制覆盖 cost
+  若配置了 costMapping（在 mapping 之后，且不扫描 editor.list()）：
+    └── 只对列出的模型写入 cost；未知源或源没有数字 cost 则保留原值并写入 dump 诊断
 ```
 
 ### 3.3 模块划分
@@ -154,6 +157,28 @@ src/
 - 先精确匹配，再大小写不敏感匹配（同时检查字典 key 与条目的 `id` 字段）
 - 目标为 `provider/model` 形式；缺 `/`、provider 不存在、model 不存在都会产出 warning
 
+### 4.4 costMapping（仅价格，手填）
+
+与 `mapping` 同结构，但是独立的一组。插件没有内置 provider 名单、模型别名或 `editor.list()` 扫描。未写进 `costMapping` 的模型，即使 provider 是 `claude-code` 或某个 Coding Plan，也不会被改价。
+
+```jsonc
+{
+  "costMapping": {
+    "claude-code": {
+      "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+      "claude-sonnet-4-6[1m]": "anthropic/claude-sonnet-4-6"
+    }
+  }
+}
+```
+
+- 可以只有 `costMapping`。此时 `mapping` 视为 `{}`，不跑完整元数据填充
+- `mapping` 与 `costMapping` 都空、配置文件不存在、或只写 `override.cost`：不启用（与历史 parser 一致）
+- 两组重叠时先执行 `mapping`，再由 `costMapping` 覆盖 `cost`。其它字段仍只受 `mapping` 的原规则约束
+- `costMapping` 不读取 `override.cost`。该开关只保留原来的 mapping 语义：为 true 时用 mapping 源强制覆盖 `cost`
+- 源不存在，或源 `cost.input` / `cost.output` 不是有限数字：不写 `cost`。原因进入 debug dump 的 `_costWarning`，不逐模型打日志
+- 写入的价格是 models.dev 估价，不是实际账单。`[1m]`、套餐 ID 与 API ID 的差异必须由用户显式写成目标，插件不猜测
+
 ## 5. 字段映射（models.dev → V2 原生模型字段）
 
 | models.dev | → | OpenCode V2 模型字段 | 说明 |
@@ -176,6 +201,8 @@ src/
   - 与默认值不同 → 视为用户显式覆盖，跳过
 - 若用户显式设置的值恰好等于默认值（例如把 `name` 写成与 modelID 相同），则无法与默认值区分，会被视为可自动填充——这是可接受的折衷
 - 用户的 `options`、`variants` 等字段完全保留
+- `override.cost` 仍只作用于 `mapping` 这一路：为 true 且 mapping 源有 cost 时强制覆盖该路的 cost。它不扫描其它 provider，也不能单独启用插件
+- `costMapping` 在上述合并之后执行，只改列出模型的 `cost`，因此重叠时最终价格以 `costMapping` 为准。源缺失或没有数字价格时保留当时的 cost（包括 mapping 刚刚填上的值）
 
 ### 6.1 对象字段的按叶子合并
 

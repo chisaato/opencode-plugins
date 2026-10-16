@@ -41,6 +41,41 @@ describe("loadConfig", () => {
     expect(await loadConfig({ projectDirectory: projectDir, homeDirectory: fakeHome })).toBeNull()
   })
 
+  it("returns null when only override.cost is set", async () => {
+    await fs.writeFile(
+      path.join(projectDir, "oc-auto-model-config.json"),
+      JSON.stringify({ override: { cost: true } }),
+    )
+    expect(await loadConfig({ projectDirectory: projectDir, homeDirectory: fakeHome })).toBeNull()
+  })
+
+  it("loads a costMapping-only config with an empty mapping", async () => {
+    await fs.writeFile(
+      path.join(projectDir, "oc-auto-model-config.json"),
+      JSON.stringify({
+        costMapping: { "claude-code": { "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6" } },
+      }),
+    )
+    const result = await loadConfig({ projectDirectory: projectDir, homeDirectory: fakeHome })
+    expect(result).not.toBeNull()
+    expect(result!.mapping).toEqual({})
+    expect(result!.costMapping).toEqual({
+      "claude-code": { "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6" },
+    })
+    expect(result!.override).toBeUndefined()
+  })
+
+  it("keeps a valid mapping when costMapping is invalid", async () => {
+    await fs.writeFile(
+      path.join(projectDir, "oc-auto-model-config.json"),
+      JSON.stringify({ mapping: { p: { m: "t/m" } }, costMapping: "nope" }),
+    )
+    const result = await loadConfig({ projectDirectory: projectDir, homeDirectory: fakeHome })
+    expect(result).not.toBeNull()
+    expect(result!.mapping.p.m).toBe("t/m")
+    expect(result!.costMapping).toBeUndefined()
+  })
+
   it("parses cacheTTL and debug options", async () => {
     await fs.writeFile(
       path.join(projectDir, "oc-auto-model-config.json"),

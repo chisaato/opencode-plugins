@@ -10,6 +10,10 @@ on:
         description: "要发布的包目录名(packages/ 下,例如 auto-retry)"
         required: true
         type: string
+      version:
+        description: "要发布的 semver,不要加 v(例如 0.1.1 或 0.2.0-beta.1)"
+        required: true
+        type: string
       dry_run:
         description: "Dry run (不实际发布)"
         required: false
@@ -76,46 +80,19 @@ jobs:
         id: target
         env:
           INPUT_PACKAGE: ${{ inputs.package }}
+          INPUT_VERSION: ${{ inputs.version }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
         run: |
+          # 手动运行把 package 与 version 拼成 tag;版本不读 package.json
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [[ ! "$INPUT_PACKAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-              echo "解析发布目标失败: package 不是 packages/ 下的单段目录名: ${INPUT_PACKAGE}" >&2
-              exit 1
-            fi
-            pkg_json="packages/${INPUT_PACKAGE}/package.json"
-            if [ ! -f "$pkg_json" ]; then
-              echo "解析发布目标失败: 未知目录 packages/${INPUT_PACKAGE} 不存在" >&2
-              exit 1
-            fi
-            version="$(jq -r '.version' "$pkg_json")"
-            if [ -z "$version" ] || [ "$version" = "null" ]; then
-              echo "解析发布目标失败: ${pkg_json} 缺少 version" >&2
-              exit 1
-            fi
-            tag="${INPUT_PACKAGE}@${version}"
+            tag="${INPUT_PACKAGE}@${INPUT_VERSION}"
           else
             tag="$REF_NAME"
           fi
           echo "正在解析发布 tag: ${tag}"
           if ! bun scripts/resolve-publish-target.ts "$tag"; then
             echo "解析发布 tag 失败: ${tag}" >&2
-            exit 1
-          fi
-
-      - name: Verify version
-        env:
-          DIR: ${{ steps.target.outputs.dir }}
-          VERSION: ${{ steps.target.outputs.version }}
-        run: |
-          if [[ ! "$DIR" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-            echo "解析发布目标失败: 未知目录 ${DIR}" >&2
-            exit 1
-          fi
-          actual="$(jq -r '.version' "packages/${DIR}/package.json")"
-          if [ "$actual" != "$VERSION" ]; then
-            echo "版本不一致: packages/${DIR}/package.json 为 ${actual}, tag 为 ${VERSION}" >&2
             exit 1
           fi
 
@@ -132,20 +109,22 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - uses: actions/setup-node@v6
+      - name: Setup Node
+        uses: actions/setup-node@v6
         with:
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
 
       - name: Use latest npm
         run: npm install -g npm@latest
+
+      # 持有 id-token 时不安装项目依赖,避免执行依赖生命周期脚本。
+      # 版本只写在本次 checkout,不提交,也不运行 npm version。
+      - name: Write tag version
+        env:
+          DIR: ${{ needs.verify.outputs.dir }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: node scripts/prepare-publish.js "$DIR" "$VERSION"
 
       - name: Publish to NPM
         env:
@@ -161,7 +140,7 @@ jobs:
           cd "packages/${DIR}"
           if [ "$DRY_RUN" = "true" ]; then
             echo "=== Dry Run Mode ==="
-            bun pm pack --dry-run
+            npm pack --dry-run
           elif [ "$NPM_TAG" = "next" ]; then
             npm publish --access public --tag next
           elif [ "$NPM_TAG" = "latest" ]; then
@@ -178,6 +157,7 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
           NPM_TAG: ${{ needs.verify.outputs.npmTag }}
           DRY_RUN: ${{ inputs.dry_run }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "## 发布结果"
@@ -193,7 +173,7 @@ jobs:
             fi
             if [ "$DRY_RUN" = "true" ]; then
               echo "Dry run 完成,未实际发布"
-            elif [ "${{ job.status }}" = "success" ]; then
+            elif [ "$JOB_STATUS" = "success" ]; then
               echo "发布成功"
             else
               echo "发布失败"

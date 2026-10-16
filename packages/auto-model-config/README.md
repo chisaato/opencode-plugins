@@ -138,10 +138,43 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 }
 ```
 
-- `mapping`: 模型映射关系（必填）
+- `mapping`: 完整元数据映射。与 `costMapping` 至少要有一组非空；只有空 `mapping`、或只写 `override.cost` 时插件不启用
+- `costMapping`: 手填的仅价格映射，结构与 `mapping` 相同。只处理列出来的模型，且只覆盖 `cost`
 - `cacheTTL`: 缓存有效期，单位秒（默认 86400 = 24 小时）
 - `cachePath`: 自定义缓存文件路径
-- `debug.enabled`: 启用调试输出
+- `debug.enabled`: 启用调试输出。未匹配或源没有价格时，原因写在 dump 里，不会逐条刷屏
 - `debug.dumpPath`: 调试输出文件路径
 - `debug.diffOnly`: 仅输出变更的字段（默认 true）
-- `override.cost`: 是否强制覆盖模型价格（默认 false）。开启后，即使用户显式配置了 `cost`，也会使用 models.dev 的价格覆盖，适用于订阅制模型查看准确用量场景
+- `override.cost`: 只作用于 `mapping`。为 true 时，即使用户显式配置了 `cost`，也会用该 mapping 源的价格覆盖。它不启用、也不阻止 `costMapping`
+
+### 仅价格映射 `costMapping`
+
+订阅或套餐 provider 的 models.dev 条目经常是 0 价，或者模型 ID 与按量 API 不一样。插件**不会**扫描全部模型，也**没有**内置 provider 名单或模型别名。需要估价时，自己写成 `costMapping`：
+
+```json
+{
+	"costMapping": {
+		"claude-code": {
+			"claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+			"claude-sonnet-4-6[1m]": "anthropic/claude-sonnet-4-6"
+		},
+		"kimi-code-plan-cn": {
+			"k3": "moonshotai-cn/kimi-k3"
+		},
+		"alibaba-coding-plan-cn": {
+			"qwen3-max-2026-01-23": "alibaba-cn/qwen3-max"
+		}
+	}
+}
+```
+
+上面的 ID 只是写法示例，必须和你当前 models.dev 里的真实条目一致。`[1m]` 这类后缀不会自动剥掉，套餐 ID 也不会自动改写成 API ID。
+
+规则：
+
+- 可以只写 `costMapping`，不必再写 `mapping`
+- 只改 `cost`，`name` / `limit` / `capabilities` 等字段保持原样
+- 与 `mapping` 指向同一模型时，先做完整元数据填充，再由 `costMapping` 覆盖价格
+- `costMapping` 是显式覆盖，不看 `override.cost`
+- 源 provider/模型不存在，或源条目没有数字 `cost` 时，保留原来的 `cost`，并在 debug dump 里写 `_costWarning`
+- 填进去的是 models.dev 的估价，不是服务商账单。OpenRouter、kilo、newapi、Copilot、OpenCode Go 等聚合或跨厂商订阅不会被自动处理；要估价就自己写一条映射

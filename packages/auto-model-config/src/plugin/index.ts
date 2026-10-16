@@ -5,6 +5,7 @@ import { loadConfig, getMappedProviders } from "../mapping/parser"
 import { resolveProviderModels } from "../mapping/resolver"
 import { fieldsFromModelsDev } from "../utils/fields-mapper"
 import { ConfigDumper, type EnhancedModelResult } from "../debug/config-dumper"
+import { applyCostMapping } from "../cost/apply-cost-mapping"
 import type { ResolvedModel } from "../types"
 
 type PlainRecord = Record<string, unknown>
@@ -246,6 +247,12 @@ export const AutoModelConfigPlugin = Plugin.define({
             model: editor.get(providerName, modelId) as unknown as Record<string, unknown>,
           }
         }
+      }
+
+      // 独立于 mapping：只处理 costMapping 里列出的模型，且只写 cost。
+      // 放在 mapping 之后，重叠时价格以 costMapping 为准。不读取 override.cost，也不扫描 editor.list()。
+      if (pluginConfig.costMapping && Object.keys(pluginConfig.costMapping).length > 0) {
+        applyCostMapping(editor, modelsDev, pluginConfig.costMapping, enhancedModels)
       }
 
       if (dumper) {

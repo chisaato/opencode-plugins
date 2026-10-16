@@ -75,6 +75,11 @@ export interface AutoModelConfig {
   cachePath?: string | null
   /** 映射关系：provider -> { modelId -> "modelsdev-provider/modelsdev-modelId" } */
   mapping: Record<string, Record<string, string>>
+  /**
+   * 仅价格映射，结构与 mapping 相同。
+   * 只覆盖列出的模型的 cost，不依赖 override.cost，也不扫描未列出的模型。
+   */
+  costMapping?: Record<string, Record<string, string>>
   /** 调试模式配置 */
   debug?: DebugConfig
   /** 覆盖行为配置 */

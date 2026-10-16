@@ -50,11 +50,11 @@ function parseAutoModelConfig(
     return null
   }
 
-  if (
-    !raw.mapping ||
-    typeof raw.mapping !== "object" ||
-    Object.keys(raw.mapping).length === 0
-  ) {
+  const mapping = parseStringMapping(raw.mapping)
+  const costMapping = parseCostMapping(raw.costMapping, configPath)
+  // 历史行为：没有非空 metadata mapping 且没有可用 costMapping 时不启用。
+  // override.cost 单独出现不能启用插件，也不能代替 costMapping。
+  if (!mapping && !costMapping) {
     console.warn(`[auto-model-config] No mapping configured in ${configPath}`)
     return null
   }
@@ -64,10 +64,53 @@ function parseAutoModelConfig(
   return {
     cacheTTL: typeof raw.cacheTTL === "number" ? raw.cacheTTL : undefined,
     cachePath: raw.cachePath ?? undefined,
-    mapping: raw.mapping as Record<string, Record<string, string>>,
+    mapping: mapping ?? {},
+    costMapping,
     debug: parseDebugConfig(raw.debug),
     override: parseOverrideConfig(raw.override, raw.overrideCost),
   }
+}
+
+function parseStringMapping(raw: unknown): Record<string, Record<string, string>> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+  if (Object.keys(raw).length === 0) return undefined
+  return raw as Record<string, Record<string, string>>
+}
+
+function parseCostMapping(
+  raw: unknown,
+  configPath: string,
+): Record<string, Record<string, string>> | undefined {
+  if (raw === undefined) return undefined
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    console.warn(`[auto-model-config] Invalid costMapping in ${configPath}`)
+    return undefined
+  }
+
+  const result: Record<string, Record<string, string>> = {}
+  let invalid = 0
+  for (const [provider, models] of Object.entries(raw)) {
+    if (!models || typeof models !== "object" || Array.isArray(models)) {
+      invalid++
+      continue
+    }
+    const entries: Record<string, string> = {}
+    for (const [modelId, target] of Object.entries(models)) {
+      if (typeof target !== "string" || target.length === 0) {
+        invalid++
+        continue
+      }
+      entries[modelId] = target
+    }
+    if (Object.keys(entries).length > 0) result[provider] = entries
+  }
+
+  if (invalid > 0) {
+    console.warn(
+      `[auto-model-config] Ignored ${invalid} invalid costMapping entr${invalid === 1 ? "y" : "ies"} in ${configPath}`,
+    )
+  }
+  return Object.keys(result).length > 0 ? result : undefined
 }
 
 function parseOverrideConfig(rawOverride: any, rawOverrideCost: any): AutoModelConfig["override"] {

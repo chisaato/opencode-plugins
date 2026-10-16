@@ -14,6 +14,10 @@ export interface EnhancedModelResult {
   warning?: string
   skipped?: boolean
   model?: Record<string, any>
+  /** costMapping 使用的显式源。与 metadata mapping 的 source 分开，避免覆盖。 */
+  costSource?: string
+  /** costMapping 未写入时的原因。不单独打日志，只进 dump。 */
+  costWarning?: string
 }
 
 export class ConfigDumper {
@@ -49,6 +53,8 @@ export class ConfigDumper {
           _source: res.source,
           _filled: res.filledFields,
         }
+        if (res.costSource) entry._costSource = res.costSource
+        if (res.costWarning) entry._costWarning = res.costWarning
 
         if (res.warning) {
           entry._warning = res.warning
@@ -89,6 +95,9 @@ export class ConfigDumper {
     let modelsFilled = 0
     let modelsNotFound = 0
     let modelsSkipped = 0
+    let costApplied = 0
+    let costSkipped = 0
+    let costUnpriced = 0
     const mappingsUsed: Record<string, string> = {}
 
     for (const [providerKey, models] of Object.entries(enhancedModels)) {
@@ -101,20 +110,35 @@ export class ConfigDumper {
         } else if (res.filledFields.length > 0) {
           modelsFilled++
         }
+        if (res.costSource) {
+          if (res.costWarning) {
+            if (res.skipped && !res.warning) costSkipped++
+            else costUnpriced++
+          } else if (res.filledFields.includes("cost")) {
+            costApplied++
+          }
+        }
       }
+    }
+
+    const summary: Record<string, unknown> = {
+      providersProcessed: Object.keys(enhancedModels).length,
+      modelsFilled,
+      modelsNotFound,
+      modelsSkipped,
+      mappingsUsed,
+    }
+    if (costApplied || costSkipped || costUnpriced) {
+      summary.costApplied = costApplied
+      summary.costSkipped = costSkipped
+      summary.costUnpriced = costUnpriced
     }
 
     return {
       plugin: "@misakacloud/opencode-auto-model-config",
       timestamp: new Date().toISOString(),
       modelsDevCacheAge: cacheAge,
-      summary: {
-        providersProcessed: Object.keys(enhancedModels).length,
-        modelsFilled,
-        modelsNotFound,
-        modelsSkipped,
-        mappingsUsed,
-      },
+      summary,
     }
   }
 }

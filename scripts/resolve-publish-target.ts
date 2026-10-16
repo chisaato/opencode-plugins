@@ -37,6 +37,7 @@ function isKnownPackageDir(dir: string): boolean {
   return existsSync(path.join(resolved, "package.json"))
 }
 
+// 版本只来自 tag。仓库 package.json 的 version 是开发占位,调用方不得拿它比对。
 export function resolvePublishTarget(tag: string): {
   dir: string
   version: string

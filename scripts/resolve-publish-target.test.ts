@@ -75,6 +75,21 @@ describe("resolvePublishTarget", () => {
     )
   })
 
+  it("版本取自 tag,不要求等于 package.json 的占位 version", () => {
+    expect(resolvePublishTarget("skill-filter@9.9.9")).toMatchObject({
+      dir: "skill-filter",
+      version: "9.9.9",
+      prerelease: false,
+      npmTag: "latest",
+    })
+    expect(resolvePublishTarget("auto-retry@0.2.0-rc.1")).toMatchObject({
+      dir: "auto-retry",
+      version: "0.2.0-rc.1",
+      prerelease: true,
+      npmTag: "next",
+    })
+  })
+
   it("剥离 refs/tags/ 前缀后再解析", () => {
     expect(resolvePublishTarget("refs/tags/auto-model-config@1.1.0")).toEqual({
       dir: "auto-model-config",
