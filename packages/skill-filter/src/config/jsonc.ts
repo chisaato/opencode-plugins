@@ -143,9 +143,26 @@ export function stripTrailingCommas(input: string): string {
   return out
 }
 
-/** 解析 JSONC 文本（容忍注释与尾逗号）。 */
+/**
+ * 去掉文件开头的 UTF-8 BOM（U+FEFF）。
+ *
+ * 只处理首字符，字符串内部的 U+FEFF 原样保留。
+ * 写入路径不调用本函数，因此不会改动 policy 同步的外科手术式替换。
+ */
+function stripLeadingBom(input: string): string {
+  if (input.charCodeAt(0) === 0xfeff) {
+    return input.slice(1)
+  }
+  return input
+}
+
+/**
+ * 解析 JSONC 文本。
+ *
+ * 容忍注释、尾逗号，以及文件开头的 BOM。字符串字面量（含注释样文本）原样保留。
+ */
 export function parseJsonc(input: string): unknown {
-  return JSON.parse(stripTrailingCommas(maskJsonComments(input)))
+  return JSON.parse(stripTrailingCommas(maskJsonComments(stripLeadingBom(input))))
 }
 
 export interface JsoncFile {

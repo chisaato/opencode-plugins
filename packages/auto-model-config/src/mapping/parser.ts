@@ -2,39 +2,34 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import type { AutoModelConfig } from "../types"
 import { getGlobalConfigDir, type PathResolutionOptions } from "../utils/paths"
+import { parseJsonc } from "./jsonc"
 
-const CONFIG_FILENAME = "oc-auto-model-config.json"
+const CONFIG_BASENAME = "oc-auto-model-config"
+// 同一目录 jsonc 先于 json。语法错误不再读同目录的另一种扩展名。
+const CONFIG_EXTENSIONS = [".jsonc", ".json"] as const
 
 export interface LoadConfigOptions extends PathResolutionOptions {}
 
 export async function loadConfig(options?: LoadConfigOptions): Promise<AutoModelConfig | null> {
-  const searchPaths: string[] = []
+  // 项目目录优先，其次全局目录。无项目目录时沿用工作目录。
+  const directories = [options?.projectDirectory ?? process.cwd(), getGlobalConfigDir(options)]
 
-  // 1. 项目目录优先（若提供）
-  if (options?.projectDirectory) {
-    searchPaths.push(path.join(options.projectDirectory, CONFIG_FILENAME))
-  } else {
-    // 兼容无参数时的工作目录
-    searchPaths.push(path.join(process.cwd(), CONFIG_FILENAME))
-  }
-
-  // 2. 全局目录回退（遵循 XDG_CONFIG_HOME / injected home / default ~/.config/opencode）
-  const globalDir = getGlobalConfigDir(options)
-  searchPaths.push(path.join(globalDir, CONFIG_FILENAME))
-
-  for (const configPath of searchPaths) {
-    try {
-      const raw = await fs.readFile(configPath, "utf-8")
-      const parsed = JSON.parse(raw)
-      return parseAutoModelConfig(parsed, configPath)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      // 文件不存在（ENOENT）是正常回退场景，不产生噪音；其它读取/解析失败则记录可诊断信息。
-      if (code !== "ENOENT") {
+  for (const directory of directories) {
+    for (const extension of CONFIG_EXTENSIONS) {
+      const configPath = path.join(directory, `${CONFIG_BASENAME}${extension}`)
+      try {
+        const raw = await fs.readFile(configPath, "utf-8")
+        const parsed = parseJsonc(raw)
+        // 语义无效时返回 null，并停在这份已选中的文件上。
+        return parseAutoModelConfig(parsed, configPath)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        // 文件不存在则试同目录的下一个扩展名，或下一目录。其它读取/解析失败不回退同目录文件。
+        if (code === "ENOENT") continue
         const reason = error instanceof Error ? error.message : String(error)
         console.warn(`[auto-model-config] Failed to read config at ${configPath}: ${reason}`)
+        break
       }
-      continue
     }
   }
 

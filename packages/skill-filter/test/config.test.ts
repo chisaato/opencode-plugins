@@ -1,9 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
 import { loadConfig } from "../src/config/loader"
 import { matchesDirectory, resolveOverrides } from "../src/config/overrides"
+import {
+  getDefaultConfigPath,
+  getDefaultConfigPaths,
+  getProjectConfigCandidateGroups,
+  getProjectConfigPaths,
+} from "../src/utils/paths"
 
 describe("loadConfig", () => {
   let root: string
@@ -214,6 +220,202 @@ describe("loadConfig", () => {
     await writeProjectConfig({ exposeTool: "yes" })
     const invalid = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
     expect(invalid.exposeTool).toBe(true)
+  })
+
+  async function writeRaw(relative: string, contents: string) {
+    const target = path.join(projectDir, relative)
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    await fs.writeFile(target, contents)
+    return target
+  }
+
+  it("still loads a plain project-root skill-filter.json", async () => {
+    const configPath = await writeProjectConfig({ hide: ["root-json"], remove: ["paseo*"] }, "skill-filter.json")
+
+    const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+    expect(resolved.rules.hide).toEqual(["root-json"])
+    expect(resolved.rules.remove).toEqual(["paseo*"])
+    expect(resolved.sources).toContain(configPath)
+  })
+
+  it("parses jsonc comments, trailing commas, a leading BOM, and keeps strings", async () => {
+    const configPath = await writeRaw(
+      ".opencode/skill-filter.jsonc",
+      `\uFEFF{
+        // leading comment
+        "hide": ["jsonc-hide",],
+        "enable": ["keep // and /* inside",],
+        /* block */
+      }
+      `,
+    )
+
+    const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+    expect(resolved.rules.hide).toEqual(["jsonc-hide"])
+    expect(resolved.rules.enable).toEqual(["keep // and /* inside"])
+    expect(resolved.sources).toContain(configPath)
+  })
+
+  it("prefers jsonc in the same directory and does not merge the sibling json", async () => {
+    const jsoncPath = await writeRaw(
+      ".opencode/skill-filter.jsonc",
+      `{
+        // this file wins
+        "hide": ["from-jsonc",],
+      }
+      `,
+    )
+    const jsonPath = await writeProjectConfig({
+      hide: ["from-json"],
+      remove: ["from-json-remove"],
+    })
+
+    const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+    expect(resolved.rules.hide).toEqual(["from-jsonc"])
+    expect(resolved.rules.remove).toEqual([])
+    expect(resolved.sources).toContain(jsoncPath)
+    expect(resolved.sources).not.toContain(jsonPath)
+  })
+
+  it("prefers .opencode/skill-filter.json over a project-root skill-filter.jsonc", async () => {
+    const opencodeJson = await writeProjectConfig(
+      { hide: ["from-opencode-json"], remove: ["opencode-remove"] },
+      ".opencode/skill-filter.json",
+    )
+    const rootJsonc = await writeRaw(
+      "skill-filter.jsonc",
+      `{
+        "hide": ["from-root-jsonc"],
+        "enable": ["root-enable"],
+      }
+      `,
+    )
+
+    const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+    expect(resolved.rules.hide).toEqual(["from-opencode-json"])
+    expect(resolved.rules.remove).toEqual(["opencode-remove"])
+    expect(resolved.rules.enable).toEqual([])
+    expect(resolved.sources).toContain(opencodeJson)
+    expect(resolved.sources).not.toContain(rootJsonc)
+  })
+
+  it("warns on a broken jsonc and does not read the sibling json, but still continues across directories", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const broken = await writeRaw(".opencode/skill-filter.jsonc", "{ this is not jsonc")
+      await writeProjectConfig({ hide: ["from-sibling-json"], remove: ["sibling-remove"] })
+      const rootJson = await writeProjectConfig({ hide: ["from-root-json"] }, "skill-filter.json")
+
+      const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+      expect(resolved.rules.hide).toEqual(["from-root-json"])
+      expect(resolved.rules.remove).toEqual([])
+      expect(resolved.sources).toContain(rootJson)
+      expect(resolved.sources).not.toContain(broken)
+      expect(resolved.sources.some((source) => source.endsWith(`${path.sep}.opencode${path.sep}skill-filter.json`))).toBe(
+        false,
+      )
+      expect(warn.mock.calls.some((args) => String(args[0]).includes("skill-filter.jsonc"))).toBe(true)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("loads an explicit jsonc path and skips the default search", async () => {
+    await writeProjectConfig({ hide: ["ignored-project"] })
+    await writeGlobalConfig({ remove: ["ignored-global"] })
+    const explicit = path.join(root, "custom.jsonc")
+    await fs.writeFile(
+      explicit,
+      `\uFEFF{
+        // explicit file
+        "remove": ["explicit-*",],
+        "hide": ["keep // inside"],
+      }
+      `,
+    )
+
+    const resolved = await loadConfig({
+      projectDirectory: projectDir,
+      homeDirectory: home,
+      inline: { configPath: explicit },
+    })
+
+    expect(resolved.rules.remove).toEqual(["explicit-*"])
+    expect(resolved.rules.hide).toEqual(["keep // inside"])
+    expect(resolved.sources).toContain(explicit)
+    expect(resolved.sources.some((source) => source.includes("skill-filter.json"))).toBe(false)
+  })
+
+  it("prefers a global jsonc over the sibling global json and still merges the project file", async () => {
+    await writeGlobalConfig({ hide: ["from-global-json"], remove: ["from-global-json"] })
+    const globalJsonc = path.join(home, ".config", "opencode", "skill-filter.jsonc")
+    await fs.writeFile(
+      globalJsonc,
+      `{
+        // global jsonc wins inside this directory
+        "remove": ["from-global-jsonc",],
+      }
+      `,
+    )
+    await writeProjectConfig({ hide: ["from-project"] })
+
+    const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+    expect(resolved.rules.remove).toEqual(["from-global-jsonc"])
+    expect(resolved.rules.hide).toEqual(["from-project"])
+    expect(resolved.sources).toContain(globalJsonc)
+    expect(resolved.sources).not.toContain(path.join(home, ".config", "opencode", "skill-filter.json"))
+  })
+
+  it("does not fall back to a global json when the global jsonc is broken", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await writeGlobalConfig({ remove: ["from-global-json"] })
+      const globalJsonc = path.join(home, ".config", "opencode", "skill-filter.jsonc")
+      await fs.writeFile(globalJsonc, "{ broken")
+      await writeProjectConfig({ hide: ["from-project"] }, "skill-filter.json")
+
+      const resolved = await loadConfig({ projectDirectory: projectDir, homeDirectory: home })
+
+      expect(resolved.rules.remove).toEqual([])
+      expect(resolved.rules.hide).toEqual(["from-project"])
+      expect(warn.mock.calls.some((args) => String(args[0]).includes("skill-filter.jsonc"))).toBe(true)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+describe("config path candidates", () => {
+  it("lists jsonc before json, and .opencode before the project root", () => {
+    const projectDir = path.join("/proj", "app")
+    const home = path.join("/home", "tester")
+
+    expect(getProjectConfigPaths(projectDir)).toEqual([
+      path.join(projectDir, ".opencode", "skill-filter.jsonc"),
+      path.join(projectDir, ".opencode", "skill-filter.json"),
+      path.join(projectDir, "skill-filter.jsonc"),
+      path.join(projectDir, "skill-filter.json"),
+    ])
+    expect(getProjectConfigCandidateGroups(projectDir)).toEqual([
+      [
+        path.join(projectDir, ".opencode", "skill-filter.jsonc"),
+        path.join(projectDir, ".opencode", "skill-filter.json"),
+      ],
+      [path.join(projectDir, "skill-filter.jsonc"), path.join(projectDir, "skill-filter.json")],
+    ])
+    expect(getDefaultConfigPaths({ homeDirectory: home })).toEqual([
+      path.join(home, ".config", "opencode", "skill-filter.jsonc"),
+      path.join(home, ".config", "opencode", "skill-filter.json"),
+    ])
+    expect(getDefaultConfigPath({ homeDirectory: home })).toBe(
+      path.join(home, ".config", "opencode", "skill-filter.json"),
+    )
   })
 })
 

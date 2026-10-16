@@ -24,7 +24,8 @@ src/
 ├── plugin/
 │   └── index.ts          # Plugin 定义：Plugin.define({ id, setup })
 ├── mapping/
-│   ├── parser.ts         # 读 oc-auto-model-config.json（项目目录优先，回退 XDG/全局配置）
+│   ├── parser.ts         # 读插件配置：项目 jsonc → 项目 json → 全局 jsonc → 全局 json
+│   ├── jsonc.ts          # 本地 JSONC 解析（注释、尾逗号、BOM；字符串原样保留）
 │   └── resolver.ts       # 根据映射查 models.dev 数据
 ├── cache/
 │   └── models-dev-cache.ts # 文件缓存：models-dev.json（TTL 24h，自动下载，动态支持 XDG 隔离）
@@ -39,7 +40,7 @@ src/
 
 ### 关键设计决策
 
-- **插件有自己的配置文件，不占用 opencode.json。** 映射写在 `oc-auto-model-config.json`，搜索顺序：当前项目根目录（`ctx.location.directory`） → XDG / 全局目录
+- **插件有自己的配置文件，不占用 opencode.json。** 映射文件是 `oc-auto-model-config.jsonc` 或 `.json`。顺序：项目 jsonc → 项目 json → 全局 jsonc → 全局 json。同目录已有 jsonc 就用它；语法错误警告后跳过同目录 json。
 - **OpenCode V2 原生契约**：使用 `@opencode/plugin` 2.x 的 `ctx.model.transform`，在 setup 中异步完成文件读取与映射解析，注册同步 editor 增强回调
 - **绝不覆盖用户已填写的显式字段** — 区分 `Model.Info.default` 的初始占位值与用户显式覆盖，只补全未显式配置的字段
 - models.dev API 数据缓存在 XDG / 全局配置目录下的 `models-dev.json`，TTL 24h，下载失败时降级使用过期缓存
@@ -55,7 +56,7 @@ src/
 }
 ```
 
-`oc-auto-model-config.json` 放映射（可在项目根目录或全局配置目录）：
+`oc-auto-model-config.jsonc`（或 `.json`）放映射（可在项目根目录或全局配置目录）：
 
 ```jsonc
 {

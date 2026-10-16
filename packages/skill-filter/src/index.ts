@@ -36,10 +36,13 @@ export type { SyncPolicyOptions, SyncPolicyResult } from "./policy/sync"
 export {
   getGlobalConfigDir,
   getDefaultConfigPath,
+  getDefaultConfigPaths,
   getProjectConfigPaths,
+  getProjectConfigCandidateGroups,
   getGlobalOpenCodeConfigPaths,
   resolveUserPath,
   CONFIG_FILENAME,
+  CONFIG_FILENAMES,
   OPENCODE_CONFIG_FILENAMES,
 } from "./utils/paths"
 export { applyFilter } from "./filter/apply"

@@ -60,6 +60,13 @@ describe("parseJsonc", () => {
   it("throws on genuinely invalid jsonc", () => {
     expect(() => parseJsonc("{ not json ")).toThrow()
   })
+
+  it("strips a leading BOM and keeps string contents", () => {
+    const text = '\uFEFF{\n  // note\n  "s": "keep // /* ,}",\n  "n": 1,\n}\n'
+    expect(parseJsonc(text)).toEqual({ s: "keep // /* ,}", n: 1 })
+    // 字符串内部的 BOM 不是文件头，必须保留。
+    expect(parseJsonc('{ "s": "\uFEFFinside" }')).toEqual({ s: "\uFEFFinside" })
+  })
 })
 
 describe("findTopLevelProperty", () => {

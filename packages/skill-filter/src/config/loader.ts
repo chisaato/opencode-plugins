@@ -1,10 +1,11 @@
 import fs from "node:fs/promises"
 import {
-  getDefaultConfigPath,
-  getProjectConfigPaths,
+  getDefaultConfigPaths,
+  getProjectConfigCandidateGroups,
   resolveUserPath,
   type PathResolutionOptions,
 } from "../utils/paths"
+import { parseJsonc } from "./jsonc"
 import { resolveOverrides } from "./overrides"
 import { isPlainObject, mergeConfigs, normalizeConfig, toRules } from "./schema"
 import type { NormalizedRules, SkillFilterConfig } from "../types"
@@ -38,10 +39,15 @@ const INLINE_SOURCE = "inline plugin options"
  * 加载并合并插件配置（多层）。
  *
  * 合并顺序（后层覆盖前层，按字段）：
- * 1. 全局配置：`~/.config/opencode/skill-filter.json`
+ * 1. 全局配置：`~/.config/opencode/skill-filter.jsonc` → `skill-filter.json`
  * 2. 全局配置内的 `overrides`：键为目录 glob，命中当前目录时合并
- * 3. 项目级配置：`<project>/.opencode/skill-filter.json` → `<project>/skill-filter.json`
+ * 3. 项目级配置：`.opencode/skill-filter.jsonc` → `.opencode/skill-filter.json`
+ *    → 项目根 `skill-filter.jsonc` → 项目根 `skill-filter.json`
  * 4. 内联 plugin options（最高）
+ *
+ * 同一目录只选用一份：jsonc 存在时不再读取同目录 json（解析失败也只警告，不回退）。
+ * 全局与项目之间仍按字段合并。项目目录之间仍是先成功解析先停，不合并更低目录。
+ * 显式路径无论扩展名都按 JSONC 解析，并跳过默认搜索。
  *
  * 内联 options 中若给出 `configPath`：
  * - 字符串：只读取该路径，跳过默认搜索
@@ -61,7 +67,8 @@ export async function loadConfig(options?: LoadConfigOptions): Promise<ResolvedC
 
   if (!skipFile) {
     if (explicitPath) {
-      const loaded = await readConfigFile(explicitPath)
+      // 显式路径只有一份，不派生同目录的另一种扩展名。
+      const loaded = await readPreferredConfig([explicitPath])
       if (loaded) {
         sources.push(loaded.path)
         const explicitConfig = normalizeConfig(loaded.raw, loaded.path)
@@ -74,8 +81,8 @@ export async function loadConfig(options?: LoadConfigOptions): Promise<ResolvedC
         }
       }
     } else {
-      // 1. 全局配置
-      const globalLoaded = await readConfigFile(getDefaultConfigPath(options))
+      // 1. 全局配置（同目录 jsonc 优先，不与 json 合并）
+      const globalLoaded = await readPreferredConfig(getDefaultConfigPaths(options))
       if (globalLoaded) {
         sources.push(globalLoaded.path)
         const globalConfig = normalizeConfig(globalLoaded.raw, globalLoaded.path)
@@ -89,9 +96,9 @@ export async function loadConfig(options?: LoadConfigOptions): Promise<ResolvedC
         }
       }
 
-      // 3. 项目级配置（先命中先用）
-      for (const candidate of getProjectConfigPaths(directory)) {
-        const loaded = await readConfigFile(candidate)
+      // 3. 项目级配置：目录之间先成功解析先停；目录内部只选一份。
+      for (const group of getProjectConfigCandidateGroups(directory)) {
+        const loaded = await readPreferredConfig(group)
         if (loaded) {
           sources.push(loaded.path)
           const projectConfig = normalizeConfig(loaded.raw, loaded.path)
@@ -124,23 +131,56 @@ export async function loadConfig(options?: LoadConfigOptions): Promise<ResolvedC
   }
 }
 
-async function readConfigFile(configPath: string): Promise<LoadedFile | null> {
-  const resolved = resolveUserPath(configPath)
-  try {
-    const raw = await fs.readFile(resolved, "utf-8")
-    const parsed: unknown = JSON.parse(raw)
-    if (!isPlainObject(parsed)) {
-      console.warn(`[skill-filter] Ignoring config at ${resolved}: expected a JSON object`)
+type ConfigRead =
+  | { kind: "loaded"; file: LoadedFile }
+  | { kind: "missing" }
+  | { kind: "rejected" }
+
+/**
+ * 在同一目录的候选里只选一份。
+ *
+ * 候选按优先级排列（jsonc 在前）。文件不存在才尝试下一份；
+ * 文件存在但读失败或解析失败时警告并停止，不回退同目录的后续文件。
+ */
+async function readPreferredConfig(candidates: readonly string[]): Promise<LoadedFile | null> {
+  for (const candidate of candidates) {
+    const result = await readConfigFile(candidate)
+    if (result.kind === "loaded") {
+      return result.file
+    }
+    if (result.kind === "rejected") {
       return null
     }
-    return { path: resolved, raw: parsed }
+  }
+  return null
+}
+
+async function readConfigFile(configPath: string): Promise<ConfigRead> {
+  const resolved = resolveUserPath(configPath)
+  let text: string
+  try {
+    text = await fs.readFile(resolved, "utf-8")
   } catch (error) {
-    // 文件不存在是正常回退场景，不产生噪音；其它读取/解析失败给出可诊断信息。
+    // 文件不存在是正常回退场景，不产生噪音；其它读取失败给出可诊断信息。
     const code = (error as NodeJS.ErrnoException).code
-    if (code !== "ENOENT") {
-      const reason = error instanceof Error ? error.message : String(error)
-      console.warn(`[skill-filter] Failed to read config at ${resolved}: ${reason}`)
+    if (code === "ENOENT") {
+      return { kind: "missing" }
     }
-    return null
+    const reason = error instanceof Error ? error.message : String(error)
+    console.warn(`[skill-filter] Failed to read config at ${resolved}: ${reason}`)
+    return { kind: "rejected" }
+  }
+
+  try {
+    const parsed: unknown = parseJsonc(text)
+    if (!isPlainObject(parsed)) {
+      console.warn(`[skill-filter] Ignoring config at ${resolved}: expected a JSON object`)
+      return { kind: "rejected" }
+    }
+    return { kind: "loaded", file: { path: resolved, raw: parsed } }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    console.warn(`[skill-filter] Failed to read config at ${resolved}: ${reason}`)
+    return { kind: "rejected" }
   }
 }

@@ -50,7 +50,7 @@ export const AutoModelConfigPlugin = Plugin.define({
 要点：
 
 - 插件对象是 `{ id, setup }`，`id` 固定为 `opencode-auto-model-config`
-- `setup(ctx)` 为**异步**：在插件启动阶段完成文件 I/O（读取 `oc-auto-model-config.json`、`models-dev.json`）与映射解析
+- `setup(ctx)` 为**异步**：在插件启动阶段完成文件 I/O（读取 `oc-auto-model-config.jsonc` / `oc-auto-model-config.json`、`models-dev.json`）与映射解析
 - `ctx.model.transform(editor => ...)` 注册的回调是**同步**的：只在内存 editor 上补全字段，不做任何 I/O
 - 绝不在 setup 之外持有异步状态；transform 回调依赖 setup 阶段解析好的数据
 
@@ -58,9 +58,13 @@ export const AutoModelConfigPlugin = Plugin.define({
 
 ```
 setup(ctx):
-  1. 读取 oc-auto-model-config.json
-     ├── ctx.location.directory/oc-auto-model-config.json（项目优先）
-     └── XDG 全局配置目录/oc-auto-model-config.json（回退）
+  1. 读取插件配置（项目目录优先于全局目录；同目录 jsonc 优先于 json）
+     ├── ctx.location.directory/oc-auto-model-config.jsonc
+     ├── ctx.location.directory/oc-auto-model-config.json
+     ├── XDG 全局配置目录/oc-auto-model-config.jsonc
+     └── XDG 全局配置目录/oc-auto-model-config.json
+     语法错误：警告，不回退同目录的另一种扩展名，继续下一目录。
+     语义无效（无可用 mapping / costMapping）：停止查找并返回 null。
   2. 读取 models-dev.json（TTL 24h；缺失/过期则下载，失败降级过期缓存）
   3. 按 mapping 解析每个 provider 的目标模型元数据
   4. ctx.model.transform(editor => ...) 注册同步增强回调
@@ -85,7 +89,8 @@ src/
 ├── plugin/
 │   └── index.ts              # Plugin.define({ id, setup }) 与 transform 逻辑
 ├── mapping/
-│   ├── parser.ts             # 读取 oc-auto-model-config.json（项目优先，XDG 回退）
+│   ├── parser.ts             # 读取插件配置：项目 jsonc → 项目 json → 全局 jsonc → 全局 json
+│   ├── jsonc.ts              # JSONC 解析：注释、尾逗号、BOM；字符串内容原样保留
 │   └── resolver.ts           # 根据映射查 models.dev 数据，产出 ResolvedModel
 ├── cache/
 │   └── models-dev-cache.ts   # models-dev.json 文件缓存（下载、TTL、失效降级）
@@ -122,9 +127,16 @@ src/
 }
 ```
 
-### 4.2 oc-auto-model-config.json（插件独立配置）
+### 4.2 oc-auto-model-config.jsonc / oc-auto-model-config.json（插件独立配置）
 
-映射写在独立文件中，搜索顺序：当前项目根目录（`ctx.location.directory`）→ XDG / 全局配置目录。
+映射写在独立文件中。搜索顺序：
+
+1. 当前项目根目录（`ctx.location.directory`）的 `oc-auto-model-config.jsonc`
+2. 同一项目目录的 `oc-auto-model-config.json`
+3. XDG / 全局配置目录的 `oc-auto-model-config.jsonc`
+4. 同一全局目录的 `oc-auto-model-config.json`
+
+同一目录只要存在 `.jsonc` 就选用它。该文件语法错误时只警告，不改读同目录 `.json`，然后才回退到下一目录。文件能解析、但没有非空 `mapping` 且没有可用 `costMapping` 时，与以前一样不启用，不再查找其它文件。`.jsonc` 接受 `//` 与 `/* */` 注释、尾逗号，以及文件开头的 UTF-8 BOM。字符串中的这些字符保持原意。
 
 ```jsonc
 {

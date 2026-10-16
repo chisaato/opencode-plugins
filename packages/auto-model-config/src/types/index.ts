@@ -66,7 +66,7 @@ export interface ModelsDevCost {
 }
 
 /**
- * 插件配置（来自 oc-auto-model-config.json）
+ * 插件配置（来自 oc-auto-model-config.jsonc 或 oc-auto-model-config.json）
  */
 export interface AutoModelConfig {
   /** 缓存 TTL，单位为秒（默认：86400 = 24 小时） */

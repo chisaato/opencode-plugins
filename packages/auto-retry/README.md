@@ -16,12 +16,14 @@ OpenCode V2 插件：当模型因内容拦截（`provider.content-filter`，常�
 
 ## 配置
 
-独立的 JSONC 文件，不写进 `opencode.json`。
+独立配置文件，不写进 `opencode.json`。`.jsonc` 和 `.json` 都按 JSONC 读取：允许注释、尾逗号和文件开头的 BOM，字符串里的 `//`、`/*` 会原样保留。
 
-- 全局：`~/.config/opencode/auto-retry.jsonc`（`homeDir` / `OPENCODE_TEST_HOME` / `XDG_CONFIG_HOME` 的解析方式与其它插件一致）
-- 项目：`<项目>/.opencode/auto-retry.jsonc`
+每个目录只读一份。同一目录里先找 `auto-retry.jsonc`，只有它不存在时才读 `auto-retry.json`。两份都在时只用 jsonc，不把 json 合并进来。jsonc 存在但读失败或解析失败时打一条警告，并且不会退回同目录的 json，避免写坏的 jsonc 让旧 json 里的 rules 生效。
 
-项目文件如果写了 `rules`（包括空数组），会**整体替换**全局 `rules`，不逐条合并。项目文件没有 `rules` 键时，沿用全局规则。`enabled` 和 `defaults` 是项目覆盖全局，没写则沿用上一层。
+- 全局：`~/.config/opencode/auto-retry.jsonc`，否则 `~/.config/opencode/auto-retry.json`（`homeDir` / `OPENCODE_TEST_HOME` / `XDG_CONFIG_HOME` 的解析方式与其它插件一致）
+- 项目：`<项目>/.opencode/auto-retry.jsonc`，否则 `<项目>/.opencode/auto-retry.json`
+
+全局和项目各自选文件，可以一边用 jsonc、一边用 json。选出之后的合并方式不变：项目文件如果写了 `rules`（包括空数组），会**整体替换**全局 `rules`，不逐条合并。项目文件没有 `rules` 键时，沿用全局规则。`enabled` 和 `defaults` 是项目覆盖全局，没写则沿用上一层。项目根目录下的同名文件不算配置。
 
 没有配置文件、`rules` 为空、`enabled: false`，或者没有任何一条规则命中时，插件完全不响应。没有内置的默认触发规则。
 

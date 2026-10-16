@@ -40,7 +40,14 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 
 ## 配置
 
-插件支持通过 `oc-auto-model-config.json` 进行配置，优先级为：当前项目根目录 > `~/.config/opencode/`。
+插件支持 `oc-auto-model-config.jsonc` 与 `oc-auto-model-config.json`。同一目录里只要有 `.jsonc` 就用它，不再读同目录的 `.json`。查找顺序：
+
+1. 当前项目根目录的 `oc-auto-model-config.jsonc`
+2. 当前项目根目录的 `oc-auto-model-config.json`
+3. 全局目录的 `oc-auto-model-config.jsonc`
+4. 全局目录的 `oc-auto-model-config.json`
+
+全局目录是 `XDG_CONFIG_HOME/opencode`，未设置时为 `~/.config/opencode/`。`.jsonc` 可以写 `//`、`/* */` 注释和尾逗号，也接受文件开头的 UTF-8 BOM。字符串里的 `//`、`/*`、`,`、`}` 按原样保留。文件语法错误时会警告，并跳过同目录的另一种扩展名，再继续下一目录。内容能解析、但没有可用的 `mapping` / `costMapping` 时，仍不启用，也不会改去读别的文件。
 
 ### 配置文件格式
 
@@ -70,7 +77,7 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 }
 ```
 
-在 `oc-auto-model-config.json` 中添加映射：
+在 `oc-auto-model-config.jsonc`（或 `.json`）中添加映射：
 
 ```json
 {

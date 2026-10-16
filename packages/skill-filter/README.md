@@ -92,18 +92,29 @@ ctx.skill.transform((skills) => {
 
 支持多层来源，**后层按字段覆盖前层**（数组整体替换，不做并集）：
 
-1. **全局配置** —— `~/.config/opencode/skill-filter.json`（遵循 `XDG_CONFIG_HOME`）
+1. **全局配置** —— 同一目录只读一份：`~/.config/opencode/skill-filter.jsonc`，不存在时才读 `skill-filter.json`（遵循 `XDG_CONFIG_HOME`）
 2. **全局配置内的 `overrides`** —— 键为目录 glob，命中当前项目目录时合并进当前规则
-3. **项目级配置** —— `<项目>/.opencode/skill-filter.json` → `<项目>/skill-filter.json`（优先级高于全局规则）
+3. **项目级配置** —— 按下面顺序取**第一份成功解析**的文件（优先级高于全局规则；命中后不再与更低的项目文件合并）：
+   - `<项目>/.opencode/skill-filter.jsonc`
+   - `<项目>/.opencode/skill-filter.json`
+   - `<项目>/skill-filter.jsonc`
+   - `<项目>/skill-filter.json`
 4. **内联 options** —— 直接写在 `opencode.jsonc` 的插件声明处（最高优先级）
+
+同一目录里 **jsonc 存在即优先**，不会和同目录的 json 做字段合并。jsonc 损坏时只发出 warning，**不回退同目录 json**；其它目录仍按原规则继续（全局失败不挡住项目；项目里更高目录失败才继续更低目录）。因此 `.opencode/skill-filter.json` 高于项目根的 `skill-filter.jsonc`。
+
+所有候选以及显式 `configPath`（不论扩展名是 `.json` 还是 `.jsonc`）都按 **JSONC** 解析：允许 `//` 与 `/* */` 注释、尾逗号，以及文件开头的 BOM。字符串里的注释样文本原样保留。显式 `configPath` 仍只读该路径，跳过默认搜索。
 
 当前目录取自 `ctx.location.directory`，缺失时回退 `process.cwd()`。
 
 ### 配置格式
 
-```json
+文件名用 `skill-filter.jsonc`（推荐）或 `skill-filter.json` 均可：
+
+```jsonc
 {
-	"remove": ["paseo*"],
+	// 硬剔除。尾逗号是允许的。
+	"remove": ["paseo*",],
 	"hide": ["ask-matt", "to-*", "grill*"],
 	"enable": ["to-spec"],
 	"syncPolicy": true,
@@ -134,7 +145,7 @@ ctx.skill.transform((skills) => {
 | `restoreUnhidden` | `boolean` | **已废弃**，保留仅为兼容旧配置，无实际作用 |
 | `debug` | `boolean` | 默认 `true`，通过 `console.debug` 输出命中的规则与修改记录 |
 | `exposeTool` | `boolean` | 默认 `true`，是否注册 `skills_list` 工具 |
-| `configPath` | `string \| false` | 显式指定配置文件路径；`false` 表示完全跳过文件加载，仅用内联 options |
+| `configPath` | `string \| false` | 显式指定配置文件路径（`.json` / `.jsonc` 都按 JSONC 解析）；`false` 表示完全跳过文件加载，仅用内联 options |
 | `syncPolicy` | `boolean` | 默认 `true`，是否把 `remove` 规则同步为内核 deny policy（写入 `experimental.policies`），供下一次启动的内核直接剔除 |
 | `syncPolicyPath` | `string` | 显式指定 policy 写入的目标配置；缺省时按序查找全局 `~/.config/opencode/opencode.jsonc` → `opencode.json`。两者都不存在则跳过（不主动创建主配置） |
 
@@ -164,8 +175,8 @@ ctx.skill.transform((skills) => {
 
 **全局**（对所有项目生效）：
 
-```json
-// ~/.config/opencode/skill-filter.json
+```jsonc
+// ~/.config/opencode/skill-filter.jsonc（也可继续用 skill-filter.json）
 {
 	"remove": ["paseo*"]
 }
@@ -173,8 +184,8 @@ ctx.skill.transform((skills) => {
 
 **仅在某个项目**（用目录级 override）：
 
-```json
-// ~/.config/opencode/skill-filter.json
+```jsonc
+// ~/.config/opencode/skill-filter.jsonc（也可继续用 skill-filter.json）
 {
 	"hide": ["grill*"],
 	"overrides": {
@@ -320,8 +331,8 @@ src/
 ├── plugin/index.ts       # Plugin.define({ id, setup })：编排 policy 同步与 skill transform
 ├── config/
 │   ├── schema.ts         # 校验 + 归一化 + 合并 + 转运行时规则
-│   ├── loader.ts         # 多层配置加载、合并、与内联 options 合并
-│   ├── jsonc.ts          # JSONC 读写：注释掩码、尾逗号容忍、外科手术式写入
+│   ├── loader.ts         # 多层配置加载（jsonc 优先于同目录 json）、合并、与内联 options 合并
+│   ├── jsonc.ts          # JSONC 读写：注释掩码、尾逗号、BOM、外科手术式写入
 │   └── overrides.ts      # 目录级 override 匹配与合并
 ├── policy/
 │   └── sync.ts           # 生成 / 合并 deny policy，并写回 experimental.policies
@@ -342,7 +353,7 @@ src/
 
 测试全面隔离 `HOME` / `XDG_CONFIG_HOME`（通过 `OPENCODE_TEST_HOME` 与临时目录），不会读取或污染宿主真实的 `~/.config/opencode/`。
 
-覆盖范围包括：规则匹配与优先级、配置多层合并与 override、`applyFilter` 的多种编辑器形态、`skills_list` 统计、JSONC 注释掩码 / 尾逗号 / 外科手术式写入，以及 policy 的生成、合并、同步（含幂等与显式路径）。
+覆盖范围包括：规则匹配与优先级、配置多层合并与 override、`skill-filter.json` / `skill-filter.jsonc` 的同目录优先级（含注释、尾逗号、BOM，以及损坏 jsonc 不回退同目录 json）、`applyFilter` 的多种编辑器形态、`skills_list` 统计、JSONC 注释掩码 / 尾逗号 / 外科手术式写入，以及 policy 的生成、合并、同步（含幂等与显式路径）。
 
 ## License
 

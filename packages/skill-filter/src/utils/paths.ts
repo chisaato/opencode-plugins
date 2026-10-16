@@ -8,8 +8,11 @@ export interface PathResolutionOptions {
   homeDirectory?: string
 }
 
-/** 插件自身的配置文件名。 */
+/** 插件自身的 JSON 配置文件名。保留给仍依赖单路径的调用方。 */
 export const CONFIG_FILENAME = "skill-filter.json"
+
+/** 同一目录内的配置文件名：jsonc 优先于 json，且只应选用一份。 */
+export const CONFIG_FILENAMES = ["skill-filter.jsonc", CONFIG_FILENAME] as const
 
 /**
  * 解析 OpenCode 的全局配置目录。
@@ -35,9 +38,25 @@ export function getGlobalConfigDir(options?: PathResolutionOptions): string {
   return path.join(os.homedir(), ".config", "opencode")
 }
 
-/** 全局默认配置文件路径：`~/.config/opencode/skill-filter.json`。 */
+/**
+ * 全局默认 JSON 配置路径：`~/.config/opencode/skill-filter.json`。
+ *
+ * 实际搜索请用 `getDefaultConfigPaths`（同目录 jsonc 优先）。
+ * 本函数保留为单路径兼容入口。
+ */
 export function getDefaultConfigPath(options?: PathResolutionOptions): string {
   return path.join(getGlobalConfigDir(options), CONFIG_FILENAME)
+}
+
+/**
+ * 全局配置候选（同一目录，按优先级）：
+ * `skill-filter.jsonc` → `skill-filter.json`。
+ *
+ * jsonc 存在时不应再读取同目录 json，即使 jsonc 无法解析。
+ */
+export function getDefaultConfigPaths(options?: PathResolutionOptions): string[] {
+  const dir = getGlobalConfigDir(options)
+  return CONFIG_FILENAMES.map((name) => path.join(dir, name))
 }
 
 /** OpenCode 主配置文件名（按查找优先级）。 */
@@ -63,12 +82,30 @@ export function resolveUserPath(target: string): string {
 }
 
 /**
- * 项目内候选配置文件路径（按优先级）。
- * 首选 `.opencode/skill-filter.json`，其次项目根目录下的 `skill-filter.json`。
+ * 项目配置按目录分组。组顺序与组内顺序都是优先级从高到低。
+ *
+ * 组顺序：`.opencode/` → 项目根目录。
+ * 组内顺序：`skill-filter.jsonc` → `skill-filter.json`。
+ *
+ * 加载器对每一组只选用一份：jsonc 存在时不读同目录 json。
+ * 组与组之间仍是先成功解析先停，解析失败则继续下一组，不跨组做字段合并。
+ */
+export function getProjectConfigCandidateGroups(projectDirectory: string): string[][] {
+  return [
+    CONFIG_FILENAMES.map((name) => path.join(projectDirectory, ".opencode", name)),
+    CONFIG_FILENAMES.map((name) => path.join(projectDirectory, name)),
+  ]
+}
+
+/**
+ * 项目内候选配置文件路径（按优先级扁平列出）。
+ *
+ * `.opencode/skill-filter.jsonc` → `.opencode/skill-filter.json`
+ * → 项目根 `skill-filter.jsonc` → 项目根 `skill-filter.json`。
+ *
+ * 扁平列表本身不表达“损坏的 jsonc 不回退同目录 json”；
+ * 该规则由 `getProjectConfigCandidateGroups` 的分组承载。
  */
 export function getProjectConfigPaths(projectDirectory: string): string[] {
-  return [
-    path.join(projectDirectory, ".opencode", CONFIG_FILENAME),
-    path.join(projectDirectory, CONFIG_FILENAME),
-  ]
+  return getProjectConfigCandidateGroups(projectDirectory).flat()
 }

@@ -5,7 +5,7 @@
  *
  * 同时用于两处来源：
  * - `opencode.jsonc` 中 plugin options（内联传参）
- * - `skill-filter.json` 配置文件
+ * - `skill-filter.jsonc` / `skill-filter.json` 配置文件
  *
  * 动作分两层：
  * - `remove` 硬剔除：调用 `editor.remove(id)`，把 skill 从运行时注册表彻底拔除。

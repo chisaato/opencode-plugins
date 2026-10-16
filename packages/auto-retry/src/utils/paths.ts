@@ -1,7 +1,11 @@
 import os from "node:os"
 import path from "node:path"
 
-export const CONFIG_FILENAME = "auto-retry.jsonc"
+/** 同目录只读一份：先 jsonc，文件不存在时才用 json。 */
+export const CONFIG_FILENAMES = ["auto-retry.jsonc", "auto-retry.json"] as const
+
+/** 首选文件名。单路径 helper 仍指向它，避免旧调用改去读 json。 */
+export const CONFIG_FILENAME = CONFIG_FILENAMES[0]
 
 export interface PathOptions {
   /** 显式注入的 HOME，测试用来避开真实配置。 */
@@ -31,7 +35,28 @@ export function globalConfigPath(options?: PathOptions): string {
   return path.join(globalConfigDir(options), CONFIG_FILENAME)
 }
 
+/**
+ * 全局候选，按优先级：
+ * `~/.config/opencode/auto-retry.jsonc` → `auto-retry.json`。
+ */
+export function globalConfigPaths(options?: PathOptions): string[] {
+  return configPathsIn(globalConfigDir(options))
+}
+
 /** `<project>/.opencode/auto-retry.jsonc`。项目根目录下的同名文件不算。 */
 export function projectConfigPath(projectDir: string): string {
   return path.join(projectDir, ".opencode", CONFIG_FILENAME)
+}
+
+/**
+ * 项目候选，按优先级：
+ * `<project>/.opencode/auto-retry.jsonc` → `auto-retry.json`。
+ * 不包含项目根目录。
+ */
+export function projectConfigPaths(projectDir: string): string[] {
+  return configPathsIn(path.join(projectDir, ".opencode"))
+}
+
+function configPathsIn(dir: string): string[] {
+  return CONFIG_FILENAMES.map((name) => path.join(dir, name))
 }
