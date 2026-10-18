@@ -554,7 +554,7 @@ describe("createHandler", () => {
 
     await handler.start()
 
-    expect(handler.retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0 })
+    expect(handler.retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0, gone: 0, stopped: 0, reserved: 0 })
   })
 
   it("每次只走三步工具调用时，连续失败会累加到熔断", async () => {
@@ -875,7 +875,8 @@ describe("createHandler", () => {
     })
 
     expect(notices).toHaveLength(1)
-    expect(retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0 })
+    // stopped 要留着，挡住同一轮后续失败，直到 stop 或足够推进量。
+    expect(retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0, gone: 0, stopped: 1, reserved: 0 })
   })
 
   it("中断取消发送后清掉该会话的内部状态", async () => {
@@ -914,7 +915,7 @@ describe("createHandler", () => {
     stream.end()
     await running
 
-    expect(handler.retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0 })
+    expect(handler.retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0, gone: 0, stopped: 0, reserved: 0 })
   })
 
   it("session.deleted 清掉该会话的全部状态", async () => {
@@ -927,7 +928,8 @@ describe("createHandler", () => {
     })
 
     expect(prompts).toEqual([])
-    expect(retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0 })
+    // gone 留着，避免删除之后的查询把计数写回去。
+    expect(retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0, gone: 1, stopped: 0, reserved: 0 })
   })
 
   it("工具 id 超过 1000 个时丢掉最旧的，旧 id 可以再次计入", async () => {
@@ -944,4 +946,580 @@ describe("createHandler", () => {
     expect(prompts).toHaveLength(2)
     expect(notices).toEqual([])
   })
+
+  const home = { directory: "/proj", workspaceID: "ws-a" }
+  const otherWorkspace = { directory: "/proj", workspaceID: "ws-b" }
+  const otherDirectory = { directory: "/other", workspaceID: "ws-a" }
+
+  function moved(sessionID: string, location: { directory: string; workspaceID?: string }): ObservedEvent {
+    return { type: "session.moved", data: { sessionID, location } }
+  }
+
+  it("多个 location 的 handler 收到同一次失败时，只有 owner 发送一条", async () => {
+    const place = home
+    const open = (owner: { directory: string; workspaceID?: string }) => {
+      const stream = manualStream()
+      const prompts: Array<{ sessionID: string; text: string }> = []
+      const running = createHandler({
+        events: stream,
+        now: () => 0,
+        owner,
+        readOwner: async () => place,
+        prompt: async (input) => {
+          prompts.push(input)
+        },
+        getSession: async () => ({ model: MODEL }),
+        listMessages: async () => [assistant("msg_a")],
+        notify: () => {},
+        config: { rules: [rule()], warnings: [] },
+        logger: silentLogger,
+      }).start()
+      return { stream, prompts, running }
+    }
+
+    const owned = open(home)
+    const sameDir = open(otherWorkspace)
+    const otherDir = open(otherDirectory)
+    await settle()
+    for (const handler of [owned, sameDir, otherDir]) {
+      handler.stream.push(stepFailed("ses_1", "msg_a"))
+    }
+    await settle()
+    for (const handler of [owned, sameDir, otherDir]) handler.stream.end()
+    await Promise.all([owned.running, sameDir.running, otherDir.running])
+
+    expect(owned.prompts).toEqual([{ sessionID: "ses_1", text: "继续" }])
+    expect(sameDir.prompts).toEqual([])
+    expect(otherDir.prompts).toEqual([])
+  })
+
+  it("主会话和子会话按各自 location 发送，parentID 不转发", async () => {
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    await createHandler({
+      events: eventsOf([stepFailed("ses_child", "msg_child"), stepFailed("ses_parent", "msg_parent")]),
+      now: () => 0,
+      owner: home,
+      readOwner: async (sessionID) => (sessionID === "ses_child" ? home : otherWorkspace),
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async (sessionID) => ({
+        model: MODEL,
+        ...(sessionID === "ses_child" ? { parentID: "ses_parent" } : {}),
+      }),
+      listMessages: async () => [assistant("msg_child"), assistant("msg_parent", 200)],
+      notify: () => {},
+      config: { rules: [rule()], warnings: [] },
+      logger: silentLogger,
+    }).start()
+
+    expect(prompts).toEqual([{ sessionID: "ses_child", text: "继续" }])
+  })
+
+  it("无关会话的失败和中断不会留下 pending 或 cancel", async () => {
+    const events: ObservedEvent[] = []
+    for (let index = 0; index < 100; index += 1) {
+      events.push(stepFailed(`ses_${index}`, `msg_${index}`))
+      events.push(interrupted(`ses_${index}`))
+    }
+    const handler = createHandler({
+      events: eventsOf(events),
+      now: () => 0,
+      owner: home,
+      readOwner: async () => otherWorkspace,
+      prompt: async () => {
+        throw new Error("不应发送")
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [],
+      notify: () => {},
+      config: { rules: [rule()], warnings: [] },
+      logger: silentLogger,
+    })
+    await handler.start()
+    expect(handler.retained()).toEqual({ tails: 0, cancels: 0, counts: 0, pending: 0, progress: 0, gone: 0, stopped: 0, reserved: 0 })
+  })
+
+  it("确认归属之前的工具调用仍会计入本 location 的清零", async () => {
+    const events: ObservedEvent[] = [stepStarted("ses_1", "msg_1")]
+    for (let index = 0; index < 3; index += 1) events.push(toolCalled("ses_1", `before_${index}`))
+    events.push(stepFailed("ses_1", "msg_1"), stepStarted("ses_1", "msg_2"))
+    for (let index = 0; index < 3; index += 1) events.push(toolCalled("ses_1", `after_${index}`))
+    events.push(stepFailed("ses_1", "msg_2"))
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const notices: string[] = []
+    await createHandler({
+      events: eventsOf(events),
+      now: () => 0,
+      owner: home,
+      readOwner: async () => home,
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_1", 100), assistant("msg_2", 200)],
+      notify: (message) => {
+        notices.push(message)
+      },
+      config: { rules: [rule({ maxRetries: 1, resetAfterToolCalls: 3 })], warnings: [] },
+      logger: silentLogger,
+    }).start()
+    expect(prompts).toHaveLength(2)
+    expect(notices).toEqual([])
+  })
+
+  it("owner 尚未返回时到达的工具不能把这次已结算的失败清零", async () => {
+    const stream = manualStream()
+    let reads = 0
+    let release = () => {}
+    let markEntered = () => {}
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const notices: string[] = []
+    const running = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      readOwner: async () => {
+        reads += 1
+        if (reads < 3) return home
+        markEntered()
+        await gate
+        return home
+      },
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_1", 100), assistant("msg_2", 200)],
+      notify: (message) => {
+        notices.push(message)
+      },
+      config: { rules: [rule({ maxRetries: 1, resetAfterToolCalls: 3 })], warnings: [] },
+      logger: silentLogger,
+    }).start()
+    await settle()
+    stream.push(stepFailed("ses_1", "msg_1"))
+    await settle()
+    stream.push(stepStarted("ses_1", "msg_2"))
+    stream.push(stepFailed("ses_1", "msg_2"))
+    await entered
+    for (let index = 0; index < 3; index += 1) stream.push(toolCalled("ses_1", `late_${index}`))
+    await settle()
+    release()
+    await settle()
+    stream.end()
+    await running
+
+    expect(prompts).toEqual([{ sessionID: "ses_1", text: "继续" }])
+    expect(notices).toHaveLength(1)
+  })
+
+  it("step.started 不查 owner；查询期间的删除、迁移、中断不会复活状态", async () => {
+    let reads = 0
+    const startedOnly = await runOwned(home, async () => {
+      reads += 1
+      return home
+    }, [stepStarted("ses_1", "msg_a")])
+    expect(reads).toBe(0)
+    expect(startedOnly.prompts).toEqual([])
+
+    const deleted = await releaseDuringFirstOwner((stream) => {
+      stream.push({ type: "session.deleted", data: { sessionID: "ses_1" } })
+    })
+    const movedAway = await releaseDuringFirstOwner((stream) => {
+      stream.push(moved("ses_1", otherWorkspace))
+    })
+    const stopped = await releaseDuringFirstOwner((stream) => {
+      stream.push(interrupted("ses_1"))
+    })
+    expect(deleted.prompts).toEqual([])
+    expect(deleted.notices).toEqual([])
+    expect(deleted.retained).toMatchObject({ counts: 0, pending: 0, progress: 0, cancels: 0 })
+    expect(movedAway.prompts).toEqual([])
+    expect(movedAway.notices).toEqual([])
+    expect(movedAway.retained).toMatchObject({ counts: 0, pending: 0, progress: 0, cancels: 0 })
+    expect(stopped.prompts).toEqual([])
+    expect(stopped.notices).toEqual([])
+    expect(stopped.retained).toMatchObject({ counts: 0, pending: 0, progress: 0, cancels: 0 })
+  })
+
+  it("推进量会话超过容量后，新会话失败关闭且不重置已有计数", async () => {
+    const events: ObservedEvent[] = []
+    for (let index = 0; index < 1000; index += 1) {
+      events.push(toolCalled(`pad_${index}`, `t_${index}`))
+    }
+    events.push(toolCalled("overflow", "too_many"))
+    events.push(stepFailed("overflow", "msg_over"))
+    events.push(stepFailed("pad_0", "msg_pad"))
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const handler = createHandler({
+      events: eventsOf(events),
+      now: () => 0,
+      owner: home,
+      readOwner: async (sessionID) => (sessionID === "overflow" ? otherWorkspace : home),
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_over"), assistant("msg_pad", 200)],
+      notify: () => {},
+      config: { rules: [rule({ maxRetries: 1 })], warnings: [] },
+      logger: silentLogger,
+    })
+    await handler.start()
+    expect(prompts.map((item) => item.sessionID)).toEqual(["pad_0"])
+    expect(handler.retained().progress).toBeLessThanOrEqual(1000)
+  })
+
+  it("1200 个挂起失败不超过容量，释放后新会话可以进入", async () => {
+    const stream = manualStream()
+    let reads = 0
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let opened = false
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const handler = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      readOwner: async (sessionID) => {
+        if (sessionID === "fresh") {
+          opened = true
+          return home
+        }
+        reads += 1
+        await gate
+        return otherWorkspace
+      },
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_fresh")],
+      notify: () => {},
+      config: { rules: [rule()], warnings: [] },
+      logger: silentLogger,
+    })
+    const running = handler.start()
+    await settle()
+    for (let index = 0; index < 1200; index += 1) stream.push(stepFailed(`flood_${index}`, `msg_${index}`))
+    await settle()
+
+    expect(reads).toBe(1000)
+    expect(handler.retained().pending).toBe(1000)
+    expect(handler.retained().tails).toBe(1000)
+    expect(handler.retained().progress).toBe(0)
+    expect(handler.retained().reserved).toBe(1000)
+    expect(prompts).toEqual([])
+
+    release()
+    await settle()
+    expect(prompts).toEqual([])
+    expect(handler.retained()).toMatchObject({ pending: 0, tails: 0, counts: 0, cancels: 0, reserved: 0 })
+
+    stream.push(stepFailed("fresh", "msg_fresh"))
+    await settle()
+    stream.end()
+    await running
+
+    expect(opened).toBe(true)
+    expect(reads).toBe(1000)
+    expect(prompts).toEqual([{ sessionID: "fresh", text: "继续" }])
+  })
+
+  it("容量占满时不会挤掉已有失败计数", async () => {
+    const stream = manualStream()
+    let reads = 0
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const notices: string[] = []
+    const handler = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      readOwner: async (sessionID) => {
+        if (sessionID === "keep") return home
+        reads += 1
+        await gate
+        return otherWorkspace
+      },
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_keep", 100), assistant("msg_next", 200)],
+      notify: (message) => {
+        notices.push(message)
+      },
+      config: { rules: [rule({ maxRetries: 1 })], warnings: [] },
+      logger: silentLogger,
+    })
+    const running = handler.start()
+    await settle()
+    stream.push(stepFailed("keep", "msg_keep"))
+    await settle()
+    expect(prompts).toEqual([{ sessionID: "keep", text: "继续" }])
+
+    for (let index = 0; index < 1200; index += 1) stream.push(stepFailed(`flood_${index}`, "msg_flood"))
+    await settle()
+    expect(reads).toBeLessThanOrEqual(1000)
+    expect(handler.retained().pending).toBeLessThanOrEqual(1000)
+    expect(handler.retained().tails).toBeLessThanOrEqual(1000)
+    expect(prompts).toEqual([{ sessionID: "keep", text: "继续" }])
+
+    release()
+    await settle()
+    stream.push(stepStarted("keep", "msg_next"))
+    stream.push(stepFailed("keep", "msg_next"))
+    await settle()
+    stream.end()
+    await running
+
+    expect(prompts).toEqual([{ sessionID: "keep", text: "继续" }])
+    expect(notices).toHaveLength(1)
+  })
+
+  it("workspaceID 缺省只和缺省相等，不能匹配有 workspace 的会话", async () => {
+    const { prompts } = await runOwned({ directory: "/proj" }, async () => ({ directory: "/proj", workspaceID: "ws-a" }))
+    expect(prompts).toEqual([])
+  })
+
+  it("owner 缺失或读取抛错时不发送", async () => {
+    const missing = await runOwned(home, async () => undefined)
+    const thrown = await runOwned(home, async () => {
+      throw new Error("get failed")
+    })
+    expect(missing.prompts).toEqual([])
+    expect(thrown.prompts).toEqual([])
+    expect(missing.notices).toEqual([])
+    expect(thrown.notices).toEqual([])
+  })
+
+  it("delay 期间迁走后不发送，迁回来之后的新失败仍然发送", async () => {
+    const stream = manualStream()
+    let place: { directory: string; workspaceID?: string } = home
+    let releaseSleep = () => {}
+    let markSleepEntered = () => {}
+    const sleepEntered = new Promise<void>((resolve) => {
+      markSleepEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      releaseSleep = resolve
+    })
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const running = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      readOwner: async () => place,
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_a"), assistant("msg_b", 200)],
+      notify: () => {},
+      config: { rules: [rule({ delayMs: 2_000 })], warnings: [] },
+      logger: silentLogger,
+      sleep: async () => {
+        markSleepEntered()
+        await gate
+      },
+    }).start()
+    await settle()
+    stream.push(stepFailed("ses_1", "msg_a"))
+    await sleepEntered
+    place = otherWorkspace
+    stream.push(moved("ses_1", otherWorkspace))
+    await settle()
+    releaseSleep()
+    await settle()
+    expect(prompts).toEqual([])
+
+    place = home
+    stream.push(stepStarted("ses_1", "msg_b"))
+    stream.push(stepFailed("ses_1", "msg_b"))
+    await settle()
+    stream.end()
+    await running
+    expect(prompts).toEqual([{ sessionID: "ses_1", text: "继续" }])
+  })
+
+  it("最终 owner 查询期间的中断、删除或卸载都不再发送", async () => {
+    const interrupted = await holdFinalOwner((stream) => {
+      stream.push({ type: "session.execution.interrupted", data: { sessionID: "ses_1", reason: "user" } })
+    })
+    const deleted = await holdFinalOwner((stream) => {
+      stream.push({ type: "session.deleted", data: { sessionID: "ses_1" } })
+    })
+    const unloaded = await holdFinalOwner((_stream, abort) => {
+      abort.abort()
+    })
+    expect(interrupted).toEqual([])
+    expect(deleted).toEqual([])
+    expect(unloaded).toEqual([])
+  })
+
+  it("卸载能停掉还在 delay 里的待发任务", async () => {
+    const abort = new AbortController()
+    const stream = manualStream()
+    let entered = false
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const running = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      readOwner: async () => home,
+      signal: abort.signal,
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_a")],
+      notify: () => {},
+      config: { rules: [rule({ delayMs: 60_000 })], warnings: [] },
+      logger: silentLogger,
+      sleep: () =>
+        new Promise(() => {
+          entered = true
+        }),
+    }).start()
+    await settle()
+    stream.push(stepFailed("ses_1", "msg_a"))
+    await settle()
+    expect(entered).toBe(true)
+    abort.abort()
+    stream.end()
+    await running
+    expect(prompts).toEqual([])
+  })
+
+  async function runOwned(
+    owner: { directory: string; workspaceID?: string },
+    readOwner: (sessionID: string) => Promise<{ directory: string; workspaceID?: string } | undefined>,
+    events: ObservedEvent[] = [stepFailed("ses_1", "msg_a")],
+  ) {
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const notices: string[] = []
+    await createHandler({
+      events: eventsOf(events),
+      now: () => 0,
+      owner,
+      readOwner,
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_a")],
+      notify: (message) => {
+        notices.push(message)
+      },
+      config: { rules: [rule()], warnings: [] },
+      logger: silentLogger,
+    }).start()
+    return { prompts, notices }
+  }
+
+  async function releaseDuringFirstOwner(during: (stream: ReturnType<typeof manualStream>) => void) {
+    const stream = manualStream()
+    let release = () => {}
+    let markEntered = () => {}
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const notices: string[] = []
+    const handler = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      readOwner: async () => {
+        markEntered()
+        await gate
+        return home
+      },
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_a")],
+      notify: (message) => {
+        notices.push(message)
+      },
+      config: { rules: [rule()], warnings: [] },
+      logger: silentLogger,
+    })
+    const running = handler.start()
+    await settle()
+    stream.push(stepFailed("ses_1", "msg_a"))
+    await entered
+    during(stream)
+    await settle()
+    release()
+    await settle()
+    stream.end()
+    await running
+    return { prompts, notices, retained: handler.retained() }
+  }
+
+  async function holdFinalOwner(
+    during: (stream: ReturnType<typeof manualStream>, abort: AbortController) => void,
+  ) {
+    const abort = new AbortController()
+    const stream = manualStream()
+    let reads = 0
+    let release = () => {}
+    let markEntered = () => {}
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const prompts: Array<{ sessionID: string; text: string }> = []
+    const running = createHandler({
+      events: stream,
+      now: () => 0,
+      owner: home,
+      signal: abort.signal,
+      readOwner: async () => {
+        reads += 1
+        if (reads === 1) return home
+        markEntered()
+        await gate
+        return home
+      },
+      prompt: async (input) => {
+        prompts.push(input)
+      },
+      getSession: async () => ({ model: MODEL }),
+      listMessages: async () => [assistant("msg_a")],
+      notify: () => {},
+      config: { rules: [rule({ delayMs: 0 })], warnings: [] },
+      logger: silentLogger,
+    }).start()
+    await settle()
+    stream.push(stepFailed("ses_1", "msg_a"))
+    await entered
+    during(stream, abort)
+    await settle()
+    release()
+    await settle()
+    stream.end()
+    await running
+    return prompts
+  }
 })

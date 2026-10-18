@@ -31,6 +31,14 @@ export function createState() {
     size(): number {
       return counts.size
     },
+
+    hasSession(sessionID: string): boolean {
+      const prefix = `${sessionID}\0`
+      for (const key of counts.keys()) {
+        if (key.startsWith(prefix)) return true
+      }
+      return false
+    },
   }
 }
 

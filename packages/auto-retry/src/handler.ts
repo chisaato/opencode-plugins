@@ -10,6 +10,24 @@ export interface ModelRef {
   variant?: string
 }
 
+/** 会话或插件实例所属的 location。workspaceID 缺省是「没有 workspace」，不是字段丢失。 */
+export interface SessionLocation {
+  readonly directory: string
+  readonly workspaceID?: string
+}
+
+export function isTrustworthyLocation(
+  location: { readonly directory?: string; readonly workspaceID?: string } | undefined,
+): location is SessionLocation {
+  if (!location || typeof location.directory !== "string" || location.directory.length === 0) return false
+  if (location.workspaceID === undefined) return true
+  return typeof location.workspaceID === "string" && location.workspaceID.length > 0
+}
+
+export function isSameLocation(owner: SessionLocation, current: SessionLocation): boolean {
+  return owner.directory === current.directory && owner.workspaceID === current.workspaceID
+}
+
 /** 复查消息时用到的字段。真实 SessionMessage 是它的超集。 */
 export interface TranscriptMessage {
   id: string
@@ -34,6 +52,8 @@ export interface ObservedEvent {
     model?: ModelRef
     /** session.tool.called 的工具调用 id，用来按次去重。 */
     id?: string
+    /** session.moved 的新 location。失败事件不靠它过滤。 */
+    location?: { readonly directory?: string; readonly workspaceID?: string }
   }
 }
 
@@ -49,6 +69,15 @@ export interface HandlerDeps {
   /** 测试注入的时钟。缺省用 Date.now。 */
   now?: () => number
   state?: RetryState
+  /**
+   * 这个插件实例所属的 location。缺省时不做归属检查，只给不关心 location 的旧测试用。
+   * 入口必须传入。传入后，读不到可信 location 就失败关闭、不发送。
+   */
+  owner?: SessionLocation
+  /** 读取会话当前 location。不缓存。抛错、缺省或不完整都视为不可信。 */
+  readOwner?: (sessionID: string) => Promise<SessionLocation | undefined>
+  /** 插件卸载时 abort，用来停掉 delay 和已经 await 中的待发任务。 */
+  signal?: AbortSignal
 }
 
 export interface RetainedEntries {
@@ -57,6 +86,9 @@ export interface RetainedEntries {
   counts: number
   pending: number
   progress: number
+  gone: number
+  stopped: number
+  reserved: number
 }
 
 interface SessionProgress {
@@ -76,6 +108,9 @@ const CONTENT_FILTER = "provider.content-filter"
 // 这些结束会打开去重闩。只有 stop 才把失败计数整段清掉。
 const LATCH_FINISH = new Set(["stop", "tool-calls", "length"])
 const SEEN_LIMIT = 1000
+// 仍占名额的会话上限。进度、闩、任务、取消、计数、gone、stopped 都算。
+// 满了不再接收新会话，也不驱逐已有失败计数。
+const SESSION_CAP = 1000
 
 /**
  * 订阅失败事件并按规则续写。
@@ -85,8 +120,10 @@ const SEEN_LIMIT = 1000
  */
 export function createHandler(deps: HandlerDeps) {
   const state = deps.state ?? createState()
-  const sleep = deps.sleep ?? delay
+  const baseSleep = deps.sleep ?? ((ms: number) => delay(ms, deps.signal))
+  const sleep = wrapSleep(baseSleep, deps.signal)
   const now = deps.now ?? Date.now
+  const guardOwner = deps.owner !== undefined
   const tails = new Map<string, Promise<void>>()
   const cancelCounts = new Map<string, number>()
   // 该会话这一次失败已经接手，重复的 step.failed / execution.failed 都丢掉。
@@ -96,6 +133,8 @@ export function createHandler(deps: HandlerDeps) {
   const gone = new Set<string>()
   // 上一次失败或 stop 之后的推进量。按会话累计，结算或 stop 时清掉。
   const progress = new Map<string, SessionProgress>()
+  // 仍占着名额的会话。进度、闩、任务、取消、计数、gone、stopped 没清完之前不还槽。
+  const reserved = new Set<string>()
 
   const enqueue = (
     sessionID: string,
@@ -111,6 +150,7 @@ export function createHandler(deps: HandlerDeps) {
       })
       .finally(() => {
         if (isTail()) tails.delete(sessionID)
+        releaseSlot(sessionID)
       })
     tails.set(sessionID, settled)
     return settled
@@ -121,32 +161,93 @@ export function createHandler(deps: HandlerDeps) {
 
     // 订阅可能先回放历史。created 是毫秒时间戳，早于这一刻的失败丢掉。
     const startedAt = now()
-    const waiting: Promise<void>[] = []
     for await (const event of deps.events) {
-      const work = onEvent(event, startedAt)
-      if (work) waiting.push(work)
+      if (deps.signal?.aborted) break
+      onEvent(event, startedAt)
     }
-    await Promise.all(waiting)
+    // 每个会话的末尾任务包住前面的排队任务，不用按事件把 Promise 一直攒着。
+    await Promise.allSettled([...tails.values()])
   }
 
-  const forgetSession = (sessionID: string, keepCancel: boolean): void => {
+  const unloaded = (): boolean => deps.signal?.aborted === true
+
+  // 控制事件已经发生时返回 true。取消代数变了要清掉这次任务的进度，但不要据此挡住以后的新失败。
+  const halted = (sessionID: string, cancelToken: number, isTail: () => boolean): boolean => {
+    if (unloaded() || gone.has(sessionID) || stopped.has(sessionID)) return true
+    if ((cancelCounts.get(sessionID) ?? 0) !== cancelToken) {
+      deps.logger.debug(`会话 ${sessionID} 在发送前被中断，跳过`)
+      stopped.delete(sessionID)
+      forgetSession(sessionID, !isTail(), isTail())
+      return true
+    }
+    return false
+  }
+
+  const ownerVerdict = async (sessionID: string): Promise<"match" | "mismatch" | "unreadable"> => {
+    if (!guardOwner || !deps.owner || !isTrustworthyLocation(deps.owner)) return "unreadable"
+    try {
+      const current = await deps.readOwner?.(sessionID)
+      if (!isTrustworthyLocation(current)) return "unreadable"
+      return isSameLocation(deps.owner, current) ? "match" : "mismatch"
+    } catch (error) {
+      deps.logger.warn(`读取会话 ${sessionID} 的 location 失败：${errorText(error)}`)
+      return "unreadable"
+    }
+  }
+
+  const forgetSession = (sessionID: string, keepCancel: boolean, clearPending: boolean): void => {
     state.recordProgress(sessionID)
-    pending.delete(sessionID)
     progress.delete(sessionID)
+    if (clearPending) pending.delete(sessionID)
     if (!keepCancel) cancelCounts.delete(sessionID)
+    releaseSlot(sessionID)
   }
 
-  const ensureProgress = (sessionID: string): SessionProgress => {
-    let current = progress.get(sessionID)
-    if (!current) {
-      current = { toolCalls: 0, seen: new Set(), runningMs: 0 }
-      progress.set(sessionID, current)
-    }
-    return current
+  const holdsSlot = (sessionID: string): boolean =>
+    progress.has(sessionID) ||
+    pending.has(sessionID) ||
+    tails.has(sessionID) ||
+    cancelCounts.has(sessionID) ||
+    stopped.has(sessionID) ||
+    gone.has(sessionID) ||
+    state.hasSession(sessionID)
+
+  const releaseSlot = (sessionID: string): void => {
+    if (holdsSlot(sessionID)) return
+    reserved.delete(sessionID)
+  }
+
+  // 新会话同步占一个名额。已占名额的后继失败和控制事件不受容量拒绝。
+  const reserve = (sessionID: string): boolean => {
+    if (!guardOwner || reserved.has(sessionID)) return true
+    if (reserved.size >= SESSION_CAP) return false
+    reserved.add(sessionID)
+    return true
+  }
+
+  // 已经有进度、闩、任务或计数的会话，控制事件必须处理。完全没见过的不建表。
+  const relevant = (sessionID: string): boolean => !guardOwner || reserved.has(sessionID) || holdsSlot(sessionID)
+
+  // 只解开仍由这次任务占用的闩。后面的任务已经接过 pending 时不能清掉。
+  const dropForeign = (sessionID: string, isTail: () => boolean): void => {
+    state.recordProgress(sessionID)
+    progress.delete(sessionID)
+    if (isTail()) pending.delete(sessionID)
+    releaseSlot(sessionID)
+  }
+
+  const ensureProgress = (sessionID: string): SessionProgress | undefined => {
+    const current = progress.get(sessionID)
+    if (current) return current
+    if (!reserve(sessionID)) return undefined
+    const created = { toolCalls: 0, seen: new Set<string>(), runningMs: 0 }
+    progress.set(sessionID, created)
+    return created
   }
 
   const noteTool = (sessionID: string, toolID: string | undefined): void => {
     const current = ensureProgress(sessionID)
+    if (!current) return
     if (toolID) {
       if (current.seen.has(toolID)) return
       if (current.seen.size >= SEEN_LIMIT) {
@@ -166,8 +267,12 @@ export function createHandler(deps: HandlerDeps) {
   }
 
   const beginStep = (sessionID: string): void => {
-    closeStep(sessionID)
-    ensureProgress(sessionID).stepStartedAt = now()
+    const current = ensureProgress(sessionID)
+    if (!current) return
+    if (current.stepStartedAt !== undefined) {
+      current.runningMs += Math.max(0, now() - current.stepStartedAt)
+    }
+    current.stepStartedAt = now()
   }
 
   const discardStep = (sessionID: string): void => {
@@ -195,9 +300,24 @@ export function createHandler(deps: HandlerDeps) {
     if (!sessionID) return undefined
 
     if (event.type === "session.deleted") {
+      if (!relevant(sessionID)) return undefined
       gone.add(sessionID)
       stopped.delete(sessionID)
-      forgetSession(sessionID, false)
+      forgetSession(sessionID, false, true)
+      return undefined
+    }
+
+    // 迁移是控制事件，必须同步处理，不能等 owner 查询。只处理已经跟踪或正在接手的会话。
+    if (event.type === "session.moved") {
+      if (!guardOwner || !deps.owner || !relevant(sessionID)) return undefined
+      const next = event.data?.location
+      const stays = isTrustworthyLocation(next) && isTrustworthyLocation(deps.owner) && isSameLocation(deps.owner, next)
+      if (!stays) {
+        cancelCounts.set(sessionID, (cancelCounts.get(sessionID) ?? 0) + 1)
+        stopped.delete(sessionID)
+        forgetSession(sessionID, true, true)
+        deps.logger.debug(`会话 ${sessionID} 已离开这个 location，取消待发续写`)
+      }
       return undefined
     }
 
@@ -215,6 +335,7 @@ export function createHandler(deps: HandlerDeps) {
     }
 
     if (event.type === "session.execution.interrupted") {
+      if (!relevant(sessionID)) return undefined
       cancelCounts.set(sessionID, (cancelCounts.get(sessionID) ?? 0) + 1)
       // 中断不是正常收口。丢掉未关闭的计时，否则之后的空闲会被算进运行时长。
       discardStep(sessionID)
@@ -236,9 +357,11 @@ export function createHandler(deps: HandlerDeps) {
       pending.delete(sessionID)
       if (finish !== "stop") {
         closeStep(sessionID)
+        releaseSlot(sessionID)
         return undefined
       }
-      // stop 是完整清零：推进量马上丢掉，失败计数等前面的任务记完再清。
+      // stop 会清掉计数。新会话在名额满时不再接，已占名额的仍要清。
+      if (!reserve(sessionID)) return undefined
       stopped.delete(sessionID)
       progress.delete(sessionID)
       return enqueue(sessionID, async () => {
@@ -263,9 +386,12 @@ export function createHandler(deps: HandlerDeps) {
     if (gone.has(sessionID) || stopped.has(sessionID)) return undefined
     if (pending.has(sessionID)) return undefined
 
+    // 没有 step.started 的失败也要先占名额，避免 owner 挂起时把 pending 撑过上限。
+    if (!reserve(sessionID)) return undefined
+
     pending.add(sessionID)
     const cancelToken = cancelCounts.get(sessionID) ?? 0
-    // 失败的这一步也算进运行时长，再结算，避免后面的工具调用被算进来。
+    // 失败到达时就结算。owner 返回后不能再拿这次的进度，后面的工具只算下一次失败。
     closeStep(sessionID)
     const settled = takeProgress(sessionID)
     return enqueue(sessionID, (isTail) => handleFailure(sessionID, event, error, cancelToken, settled, isTail))
@@ -280,12 +406,23 @@ export function createHandler(deps: HandlerDeps) {
     isTail: () => boolean,
   ): Promise<void> => {
     try {
-      if (gone.has(sessionID) || stopped.has(sessionID)) return
+      if (halted(sessionID, cancelToken, isTail)) return
+      if (guardOwner) {
+        const verdict = await ownerVerdict(sessionID)
+        if (halted(sessionID, cancelToken, isTail)) return
+        if (verdict !== "match") {
+          dropForeign(sessionID, isTail)
+          deps.logger.debug(`会话 ${sessionID} 不属于这个 location，跳过`)
+          return
+        }
+      }
       const before = await deps.listMessages(sessionID)
       // 等待消息的时候会话可能已被删除，不能再把计数写回去。
-      if (gone.has(sessionID)) return
+      if (halted(sessionID, cancelToken, isTail)) return
       const assistantID = event.data?.assistantMessageID
       const model = await resolveModel(sessionID, assistantID, before)
+      // 卸载或中断发生在读模型期间时，不能再计数，也不能发熔断通知。
+      if (halted(sessionID, cancelToken, isTail)) return
       if (!model) {
         deps.logger.debug(`会话 ${sessionID} 取不到失败请求的模型，跳过`)
         return
@@ -302,8 +439,8 @@ export function createHandler(deps: HandlerDeps) {
         state.clearRule(sessionID, ruleIndex)
       }
       // 删除事件可能插在计数之前。写完再清一次，避免计数被写回去。
-      if (gone.has(sessionID)) {
-        state.recordProgress(sessionID)
+      if (gone.has(sessionID) || halted(sessionID, cancelToken, isTail)) {
+        if (gone.has(sessionID)) state.recordProgress(sessionID)
         return
       }
       const count = state.recordFailure(sessionID, ruleIndex)
@@ -311,6 +448,7 @@ export function createHandler(deps: HandlerDeps) {
         state.recordProgress(sessionID)
         return
       }
+      if (halted(sessionID, cancelToken, isTail)) return
       if (count > matched.maxRetries) {
         if (count === matched.maxRetries + 1) {
           deps.notify(
@@ -318,20 +456,24 @@ export function createHandler(deps: HandlerDeps) {
           )
         }
         stopped.add(sessionID)
-        forgetSession(sessionID, !isTail())
+        forgetSession(sessionID, !isTail(), isTail())
         return
       }
 
       if (matched.delayMs > 0) await sleep(matched.delayMs)
-      if (gone.has(sessionID)) return
-      if ((cancelCounts.get(sessionID) ?? 0) !== cancelToken) {
-        deps.logger.debug(`会话 ${sessionID} 在发送前被中断，跳过`)
-        stopped.delete(sessionID)
-        forgetSession(sessionID, !isTail())
-        return
+      if (halted(sessionID, cancelToken, isTail)) return
+      if (guardOwner) {
+        const verdict = await ownerVerdict(sessionID)
+        if (halted(sessionID, cancelToken, isTail)) return
+        if (verdict !== "match") {
+          dropForeign(sessionID, isTail)
+          deps.logger.debug(`会话 ${sessionID} 发送前已不属于这个 location，跳过`)
+          return
+        }
       }
 
       const after = await deps.listMessages(sessionID)
+      if (halted(sessionID, cancelToken, isTail)) return
       if (hasUserMessageAfter(after, cutoffOf(before, assistantID, event.created))) {
         deps.logger.debug(`会话 ${sessionID} 在失败后已有新的用户消息，跳过`)
         return
@@ -380,6 +522,9 @@ export function createHandler(deps: HandlerDeps) {
         counts: state.size(),
         pending: pending.size,
         progress: progress.size,
+        gone: gone.size,
+        stopped: stopped.size,
+        reserved: reserved.size,
       }
     },
   }
@@ -415,8 +560,34 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function delay(ms: number): Promise<void> {
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
   return new Promise((resolve) => {
-    setTimeout(resolve, ms)
+    const timer = setTimeout(finish, ms)
+    const onAbort = () => finish()
+    signal?.addEventListener("abort", onAbort, { once: true })
+    function finish() {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }
   })
+}
+
+function wrapSleep(
+  sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal | undefined,
+): (ms: number) => Promise<void> {
+  if (!signal) return sleep
+  return (ms) => {
+    if (signal.aborted) return Promise.resolve()
+    return new Promise((resolve) => {
+      const onAbort = () => resolve()
+      signal.addEventListener("abort", onAbort, { once: true })
+      sleep(ms).then(() => {
+        signal.removeEventListener("abort", onAbort)
+        resolve()
+      })
+    })
+  }
 }

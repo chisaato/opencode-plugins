@@ -1,4 +1,6 @@
-# opencode-auto-model-config
+# @misakacloud/opencode-auto-model-config
+
+独立的 OpenCode 插件，单独安装、配置和发布。[仓库总览](../../README.md) · [@misakacloud/opencode-auto-retry](../auto-retry/README.md) · [@misakacloud/opencode-skill-filter](../skill-filter/README.md)
 
 OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 provider 自动填充模型元数据。
 

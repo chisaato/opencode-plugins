@@ -1,5 +1,7 @@
 # @misakacloud/opencode-skill-filter
 
+独立的 OpenCode 插件，单独安装、配置和发布。[仓库总览](../../README.md) · [@misakacloud/opencode-auto-retry](../auto-retry/README.md) · [@misakacloud/opencode-auto-model-config](../auto-model-config/README.md)
+
 OpenCode V2 的 **Skill 治理核心引擎**：对加载的 skill 做**双管齐下**的治理——运行时把多余或相互冲突的 skill **软隐藏**（`autoinvoke: false`）或**彻底掩埋**（从运行时注册表移除），同时把 `remove` 规则自动同步为**内核级 Policy**，让内核在内置的 `ConfigPolicyPlugin` 里于**所有插件之后**把命中的 skill 物理拔除。即便兼容层插件在重载时再次注入这些技能，也会被再次剔除。
 
 由此节省 token、避免指令冲突，同时保留 `@skill-name` 手动调用能力。

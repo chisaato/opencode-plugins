@@ -1,8 +1,10 @@
 # @misakacloud/opencode-auto-retry
 
+独立的 OpenCode 插件，单独安装、配置和发布。[仓库总览](../../README.md) · [@misakacloud/opencode-skill-filter](../skill-filter/README.md) · [@misakacloud/opencode-auto-model-config](../auto-model-config/README.md)
+
 OpenCode V2 插件：当模型因内容拦截（`provider.content-filter`，常见文案 “Provider blocked the response”）停下时，按配置向该会话发一条可见的续写消息，例如“继续”。
 
-只支持 OpenCode V2（`@opencode/plugin` 2.x）。内容拦截不在内核的可重试错误里，所以本插件自己订阅失败事件，不使用 `session.hook("retry")`。
+最低支持 OpenCode V2 的 `@opencode/plugin@2.0.31`（其依赖的 `effect@4.0.1`）。不保证之后任意 Effect 4 版本都能跑。本插件自己订阅失败事件并发送可见续写，不使用 `session.hook("retry")`。内核 retry 不会发出这条「继续」；这里只处理规则命中的 `provider.content-filter`，不是「所有内容拦截都不重试」。
 
 ## 安装
 
@@ -67,21 +69,23 @@ OpenCode V2 插件：当模型因内容拦截（`provider.content-filter`，常�
 5. 同一会话第一次接手失败事件（`step.failed` 或 `execution.failed`，谁先到算谁）后先闩上。闩着的时候，这个会话后续的失败事件全部忽略。下一个 `session.step.started`，或 `finish` 为 `stop` / `tool-calls` / `length` 的 `session.step.ended`，才把闩打开。
 6. 计数的是「没有取得足够推进的连续失败」，按会话 + 规则分开。每次失败先结算上一次失败之后的推进量：`session.tool.called` 的次数 ≥ `resetAfterToolCalls`，或**累计运行时长** ≥ `resetAfterMs`，就把该规则的计数清零，再把这次记成第 1 次；否则继续累加。运行时长只累加已经收口的 step：从 `session.step.started` 到 `finish` 为 `stop` / `tool-calls` / `length` 的 `ended`，以及内容拦截的 `step.failed`（失败的那一步也算）。`aborted` 等非拦截失败、`session.execution.interrupted`、`finish: "unknown"` 会丢掉尚未关闭的计时，不把这一步以及之后的空闲算进去。`delayMs`、空闲、用户离开的墙钟时间不算。同一个工具 id 只计一次，记住的 id 超过 1000 个就丢掉最旧的。`finish: "stop"` 把该会话的计数和推进量整段清掉。`finish` 为 `content-filter` 或 `error` 的 step 不计入推进量，`tool-calls` / `length` 只开闩、不清计数。
 7. 连续失败次数超过 `maxRetries` 后停止发送，原始错误留在会话里，并打出一次警告。同一轮超限只提示一次，直到计数被 `stop` 或足够的推进量清零。
-8. 主会话和子会话（带 `parentID`）同样处理。已知风险：父任务可能已经把子任务判失败，续写会造成状态不一致。这个风险是接受的。
+8. 主会话和子会话（带 `parentID`）同样处理，按各自 `session.get` 的真实 location 判断归属，不把子会话失败复制到父会话。已知风险：父任务可能已经把子任务判失败，续写会造成状态不一致。这个风险是接受的。
+9. OpenCode 2.0.31 存在插件订阅丢失 location 上下文的问题，同一次失败可能被多个 location 的插件实例收到。本插件不依赖宿主隔离，也不按 `event.location` 判断会话归属。每个实例在计数前和 `delayMs` 之后各读一次 `session.get().location`，`directory` 与 `workspaceID` 都和自己相同才发送。`workspaceID` 缺省表示没有 workspace，和有 id 的不算同一个。失败事件一到就结算推进量，查询返回之后不再重算；这期间新来的工具只算下一次失败。读失败、location 不完整或不匹配，都不发送，并清掉该会话已记下的进度。正在记住的会话最多 1000 个，推进量、待发失败、取消标记和失败计数都占名额。没有 `step.started` 的失败也先占名额；满了之后新会话直接忽略，不会挤掉已有失败计数，名额要等这次状态全部释放才还。没见过的中断不建表；已经有进度或待发任务的删除和迁移会马上取消。插件卸载会停掉还在等待的发送，不只是取消事件订阅。同一 location 里一次失败仍可能连发 `step.failed` 和 `execution.failed`，这条去重语义没有改。
 
 续写走 `ctx.session.prompt({ sessionID, text })`，是一条普通可见的用户消息，不走 synthetic。
 
 ## 已知限制
 
-- **不能指定续写所用的模型。** `@opencode/plugin@2.0.16` 的 `SessionPromptInput` 只有 `sessionID`、`text`、附件、`metadata`、`delivery`、`resume`，没有 `model`。续写使用会话当前模型。OpenCode 在一轮运行里不会中途换模型，失败模型通常仍是会话模型；若在 `delayMs` 期间手动换了会话模型，续写会用新的那个。
+- **不能指定续写所用的模型。** `@opencode/plugin@2.0.31` 的 `SessionPromptInput` 只有 `sessionID`、`text`、附件、`metadata`、`delivery`、`resume`，没有 `model`。续写使用会话当前模型。OpenCode 在一轮运行里不会中途换模型，失败模型通常仍是会话模型；若在 `delayMs` 期间手动换了会话模型，续写会用新的那个。
 - **超限提示只能写日志。** V2 的 promise 插件 `Context` 没有 toast / notify 通道。超限时调用 `console.warn`，前缀 `[auto-retry]`。TUI 的 `toast.show` 属于另一类 `@opencode/plugin/tui` 插件，这个包没有接。
-- **事件类型是手写的结构类型，再在插件入口做类型断言。** `ObservedEvent` 不是从 `@opencode/plugin` 生成出来的。真实事件字段以后若改名或改形状，编译器不会报警，要靠实测或对照类型声明才能发现。
+- **处理器使用手写的事件子集。** 插件入口将公开事件投影为 `ObservedEvent`，只保留处理器需要的字段；宿主事件契约变化仍需回归验证。
 - 模型通配按 `providerID/id` 匹配，忽略 variant（`provider/model#variant` 里的 `#variant`）。
 - 只处理 `provider.content-filter`。配置里的 `errors` 是在这个类型之内再按文案过滤，不能拿来重试限流或网络错误。`step.failed` 上 `error.type === "aborted"`（例如 “Step interrupted”）不续写。
-- **工具调用数来自 `session.tool.called`，不拿 `finish: "tool-calls"` 的 step 数做近似。** `@opencode/plugin@2.0.16` 和当前源码都有这个事件，payload 里有每次调用的 `id`。并行调用各有各的 id，会分别计数。`executed` 字段的语义还没在真实运行里核实，目前只要发出 `session.tool.called` 就计入推进量，不区分有没有真正执行。如果某次运行没发出这个事件，推进量会偏少，阈值更难达到（偏保守，不会因此过早清零）。
+- **工具调用数来自 `session.tool.called`，不拿 `finish: "tool-calls"` 的 step 数做近似。** `@opencode/plugin@2.0.31` 和当前源码都有这个事件，payload 里有每次调用的 `id`。并行调用各有各的 id，会分别计数。`executed` 字段的语义还没在真实运行里核实，目前只要发出 `session.tool.called` 就计入推进量，不区分有没有真正执行。如果某次运行没发出这个事件，推进量会偏少，阈值更难达到（偏保守，不会因此过早清零）。
 - **没有总重试上限。** 熔断只看「没有足够推进的连续失败」。如果模型每次被拦截之前，都已经调用了不少于 `resetAfterToolCalls` 次工具，或者累计运行不少于 `resetAfterMs`，会被当成有推进，计数清零后重新从 1 开始，于是一直不熔断。
 - 事件的 `created` 是毫秒时间戳（`Clock.currentTimeMillis`）。早于插件开始订阅的失败当成历史回放丢掉。`session.deleted` 会清掉该会话在插件里的计数和推进量。
 - 读取失败所属模型用的是 `ctx.session.context()` 返回的消息（助手消息上的 `model`），不是单独的 `message.list`。插件 `SessionDomain` 没有暴露 `message.list`。`execution.failed` 不带 `assistantMessageID`，这时直接回退会话模型。
+- **入口是 `@opencode/plugin/effect`。** 该入口不 re-export `Effect` / `Stream`。本包直接依赖 `effect@4.0.1`，与 `@opencode/plugin@2.0.31` 声明的依赖一致，不是 optional peer，也不表示所有 Effect 4 都能用。Promise 版 `session.get().location` 只有 `directory`；Effect 版才有 `workspaceID`。归属每次现查，不缓存。插件 effect 在挂上 finalizer 和订阅后就返回；宿主持有的 Scope 关掉时才卸载。已经交给 `session.prompt` 的续写不会再撤回。
 - **下列行为没有在真实 OpenCode 进程里确认过**，单元测试只覆盖了我们假定的事件形态：
   1. `session.step.failed` 之后，内核还会不会再补发一条 `session.step.ended`。
   2. `session.step.failed` 和 `session.execution.failed` 的实际到达顺序，以及事件到达时 `session.context()` 里是否已经有这条失败助手消息。
