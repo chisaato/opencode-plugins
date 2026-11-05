@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
-import { AutoModelConfigPlugin } from "../src/index"
+import { setupPlugin } from "./helpers/plugin"
 import { Model } from "@opencode/plugin"
 import type { ModelsDevData } from "../src/types"
 
@@ -119,7 +119,7 @@ describe("V2 default model vs explicit user overrides", () => {
     }
 
     const { ctx, getTransform } = makeCtx()
-    await AutoModelConfigPlugin.setup(ctx)
+    await setupPlugin(ctx)
     const transformCallback = getTransform()
     expect(transformCallback).toBeDefined()
     transformCallback!(makeEditor(fakeModels))
@@ -167,7 +167,7 @@ describe("V2 default model vs explicit user overrides", () => {
     const fakeModels: Record<string, any> = { "partial-gpt4o": partialModel }
 
     const { ctx, getTransform } = makeCtx()
-    await AutoModelConfigPlugin.setup(ctx)
+    await setupPlugin(ctx)
     const transformCallback = getTransform()
     expect(transformCallback).toBeDefined()
     transformCallback!(makeEditor(fakeModels))
@@ -202,7 +202,7 @@ describe("V2 default model vs explicit user overrides", () => {
       const fakeModels: Record<string, any> = { "default-gpt4o": liveDefaultModel }
 
       const { ctx, getTransform } = makeCtx()
-      await AutoModelConfigPlugin.setup(ctx)
+      await setupPlugin(ctx)
       const transformCallback = getTransform()
       expect(transformCallback).toBeDefined()
       transformCallback!(makeEditor(fakeModels))
@@ -221,6 +221,7 @@ describe("V2 default model vs explicit user overrides", () => {
     await fs.writeFile(
       path.join(projectDir, "oc-auto-model-config.json"),
       JSON.stringify({
+        cachePath,
         mapping: {
           "my-provider": {
             "explicit-gpt4o": "openai/gpt-4o",
@@ -243,7 +244,7 @@ describe("V2 default model vs explicit user overrides", () => {
     }
 
     const { ctx, getTransform } = makeCtx()
-    await AutoModelConfigPlugin.setup(ctx)
+    await setupPlugin(ctx)
     const transformCallback = getTransform()
     expect(transformCallback).toBeDefined()
     transformCallback!(makeEditor(fakeModels))

@@ -41,7 +41,7 @@ src/
 ### 关键设计决策
 
 - **插件有自己的配置文件，不占用 opencode.json。** 映射文件是 `oc-auto-model-config.jsonc` 或 `.json`。顺序：项目 jsonc → 项目 json → 全局 jsonc → 全局 json。同目录已有 jsonc 就用它；语法错误警告后跳过同目录 json。
-- **OpenCode V2 原生契约**：使用 `@opencode/plugin` 2.x 的 `ctx.model.transform`，在 setup 中异步完成文件读取与映射解析，注册同步 editor 增强回调
+- **OpenCode V2 原生契约**：只注册一次同步 `ctx.model.transform`，读取当前内存快照；配置变更时异步读取并原子替换快照，调用 `ctx.model.reload()` 重放。setup 返回清理函数释放监听；无配置启动也保持监听
 - **绝不覆盖用户已填写的显式字段** — 区分 `Model.Info.default` 的初始占位值与用户显式覆盖，只补全未显式配置的字段
 - models.dev API 数据缓存在 XDG / 全局配置目录下的 `models-dev.json`，TTL 24h，下载失败时降级使用过期缓存
 

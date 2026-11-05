@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util"
+import { watchFile, unwatchFile } from "node:fs"
+import path from "node:path"
 import { Plugin, Model } from "@opencode/plugin"
 import { ModelsDevCache } from "../cache/models-dev-cache"
 import { loadConfig, getMappedProviders } from "../mapping/parser"
@@ -6,9 +8,39 @@ import { resolveProviderModels } from "../mapping/resolver"
 import { fieldsFromModelsDev } from "../utils/fields-mapper"
 import { ConfigDumper, type EnhancedModelResult } from "../debug/config-dumper"
 import { applyCostMapping } from "../cost/apply-cost-mapping"
-import type { ResolvedModel } from "../types"
+import { getGlobalConfigDir } from "../utils/paths"
+import type { AutoModelConfig, ModelsDevData, ResolvedModel } from "../types"
 
 type PlainRecord = Record<string, unknown>
+
+interface Snapshot {
+  pluginConfig: AutoModelConfig
+  modelsDev: ModelsDevData
+  allResolved: Map<string, Map<string, ResolvedModel>>
+  cacheAge: number
+  dumper: ConfigDumper | null
+}
+
+async function loadSnapshot(projectDir: string): Promise<Snapshot | null> {
+  const pluginConfig = await loadConfig({ projectDirectory: projectDir })
+  if (!pluginConfig) return null
+  const cache = new ModelsDevCache({
+    cachePath: pluginConfig.cachePath,
+    cacheTTL: pluginConfig.cacheTTL,
+    projectDirectory: projectDir,
+  })
+  const modelsDev = await cache.get()
+  if (!modelsDev) throw new Error("No models.dev data available")
+  const cacheAge = await cache.getAge()
+  const allResolved = new Map<string, Map<string, ResolvedModel>>()
+  for (const provider of getMappedProviders(pluginConfig)) {
+    allResolved.set(provider, resolveProviderModels(modelsDev, pluginConfig, provider))
+  }
+  const dumper = pluginConfig.debug?.enabled
+    ? new ConfigDumper({ ...pluginConfig.debug, projectDirectory: projectDir })
+    : null
+  return { pluginConfig, modelsDev, allResolved, cacheAge, dumper }
+}
 
 /** `Model.Info.default(providerID, modelID)` 的真实参数类型（带 brand 的 Provider.ID / Model.ID）。 */
 type ModelDefaultArgs = Parameters<typeof Model.Info.default>
@@ -126,50 +158,71 @@ function mergeModelField(
 export const AutoModelConfigPlugin = Plugin.define({
   id: "opencode-auto-model-config",
   async setup(ctx) {
-    const projectDir = ctx.location?.directory
-    const pluginConfig = await loadConfig({ projectDirectory: projectDir })
-    if (!pluginConfig) {
-      return
+    const projectDir = ctx.location?.directory ?? process.cwd()
+    let snapshot: Snapshot | null = null
+    let disposed = false
+    let revision = 0
+    let handledRevision = -1
+    let running = false
+    let ready = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const report = (error: unknown) => {
+      console.error("[auto-model-config] Failed to refresh models:", error)
+    }
+    const refresh = async (initial = false) => {
+      if (disposed || running || (!initial && handledRevision === revision)) return
+      running = true
+      try {
+        let current: number
+        do {
+          current = revision
+          try {
+            const next = await loadSnapshot(projectDir)
+            // 串行读取；丢弃读取期间已被新事件取代的结果。
+            if (disposed) return
+            if (current !== revision) continue
+            snapshot = next
+            if (!initial) await ctx.model.reload()
+          } catch (error) {
+            // 保留最后成功快照，后续配置事件仍可重试。
+            if (!disposed) report(error)
+          }
+          if (!disposed) handledRevision = current
+        } while (!disposed && current !== revision)
+      } finally {
+        running = false
+      }
+    }
+    const changed = () => {
+      if (disposed) return
+      revision++
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = undefined
+        if (ready) void refresh()
+      }, 75)
+    }
+    // 按文件轮询也能发现尚不存在的全局目录，无需创建宿主目录。
+    const files = [...new Set([projectDir, getGlobalConfigDir()])].flatMap((directory) =>
+      ["jsonc", "json"].map((extension) => path.join(directory, `oc-auto-model-config.${extension}`)),
+    )
+    for (const file of files) watchFile(file, { interval: 250, persistent: false }, changed)
+    const cleanup = () => {
+      if (disposed) return
+      disposed = true
+      if (timer) clearTimeout(timer)
+      for (const file of files) unwatchFile(file, changed)
     }
 
-    const cache = new ModelsDevCache({
-      cachePath: pluginConfig.cachePath ?? undefined,
-      cacheTTL: pluginConfig.cacheTTL,
-      projectDirectory: projectDir,
-    })
+    await refresh(true)
+    ready = true
 
-    let modelsDev
-    try {
-      modelsDev = await cache.get()
-    } catch (error) {
-      console.error(
-        "[auto-model-config] Failed to load models.dev data:",
-        error instanceof Error ? error.message : String(error),
-      )
-      return
-    }
-
-    if (!modelsDev) {
-      console.warn("[auto-model-config] No models.dev data available")
-      return
-    }
-
-    const cacheAge = await cache.getAge()
-    const mappedProviders = getMappedProviders(pluginConfig)
-    const debugConfig = pluginConfig.debug
-    const dumper = debugConfig?.enabled
-      ? new ConfigDumper({ ...debugConfig, projectDirectory: projectDir })
-      : null
-
-    // 解析映射
-    const allResolved = new Map<string, Map<string, ResolvedModel>>()
-    for (const providerName of mappedProviders) {
-      const resolved = resolveProviderModels(modelsDev, pluginConfig, providerName)
-      allResolved.set(providerName, resolved)
-    }
-
-    // 注册 V2 model transform
-    await ctx.model.transform((editor) => {
+    // 只注册一次：宿主 reload 重建干净模型基底并按序重放 transform，不重新执行 setup。
+    // transform 由宿主 Scope 自动释放；cleanup 只清理插件自有的监听和计时器。
+    await Promise.resolve(ctx.model.transform((editor) => {
+      if (disposed || !snapshot) return
+      const { pluginConfig, modelsDev, allResolved, cacheAge, dumper } = snapshot
       const enhancedModels: Record<string, Record<string, EnhancedModelResult>> = {}
 
       for (const [providerName, resolvedMap] of allResolved) {
@@ -260,7 +313,11 @@ export const AutoModelConfigPlugin = Plugin.define({
           console.error("[auto-model-config] Failed to write debug dump:", err)
         })
       }
+    })).catch((error) => {
+      cleanup()
+      throw error
     })
+    return cleanup
   },
 })
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
-import { AutoModelConfigPlugin } from "../src/index"
+import { setupPlugin } from "./helpers/plugin"
 import { Model } from "@opencode/plugin"
 import type { ModelsDevData } from "../src/types"
 
@@ -98,7 +98,7 @@ describe("V2 Adapter / Host Contract Integration (mocked ModelEditor)", () => {
     }
 
     // 执行 setup
-    await AutoModelConfigPlugin.setup(hostContext)
+    await setupPlugin(hostContext)
     expect(registeredTransform).toBeDefined()
 
     // 模拟 V2 editor 触发

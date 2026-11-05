@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
-import { AutoModelConfigPlugin } from "../src/index"
+import { setupPlugin } from "./helpers/plugin"
 import type { ModelsDevData } from "../src/types"
 
 describe("V2 transform editor integration", () => {
@@ -100,7 +100,7 @@ describe("V2 transform editor integration", () => {
       },
     }
 
-    await AutoModelConfigPlugin.setup(mockCtx)
+    await setupPlugin(mockCtx)
 
     expect(transformCallback).toBeDefined()
     transformCallback!(mockEditor)
@@ -162,7 +162,7 @@ describe("V2 transform editor integration", () => {
       },
     }
 
-    await AutoModelConfigPlugin.setup(mockCtx)
+    await setupPlugin(mockCtx)
     expect(transformCallback).toBeDefined()
     expect(() => transformCallback!(mockEditor)).not.toThrow()
   })

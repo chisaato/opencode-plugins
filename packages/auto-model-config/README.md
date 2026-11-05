@@ -14,6 +14,7 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 
 - 自动从 models.dev 获取模型元数据
 - 支持自定义 provider 和模型 ID 映射
+- 配置保存后自动刷新模型列表，无需重启 OpenCode
 - 本地缓存（24 小时），避免频繁请求
 - 不覆盖用户已填写的字段
 - 支持调试模式，可查看配置变更
@@ -50,6 +51,8 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 4. 全局目录的 `oc-auto-model-config.json`
 
 全局目录是 `XDG_CONFIG_HOME/opencode`，未设置时为 `~/.config/opencode/`。`.jsonc` 可以写 `//`、`/* */` 注释和尾逗号，也接受文件开头的 UTF-8 BOM。字符串里的 `//`、`/*`、`,`、`}` 按原样保留。文件语法错误时会警告，并跳过同目录的另一种扩展名，再继续下一目录。内容能解析、但没有可用的 `mapping` / `costMapping` 时，仍不启用，也不会改去读别的文件。
+
+插件会监听上述项目与全局配置文件的创建、修改和删除，重新按相同优先级读取配置，再通过 V2 `ctx.model.reload()` 刷新模型列表。启动时没有配置也可稍后创建；移除映射后，下次刷新不再应用该映射。模型数据仍遵循 `cacheTTL` 缓存策略，不会因每次保存都强制下载 models.dev。
 
 ### 配置文件格式
 

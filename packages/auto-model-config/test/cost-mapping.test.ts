@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
-import { AutoModelConfigPlugin } from "../src/index"
+import { setupPlugin } from "./helpers/plugin"
 import type { ModelsDevData } from "../src/types"
 
 describe("costMapping red", () => {
@@ -100,7 +100,7 @@ describe("costMapping red", () => {
       },
     }
 
-    await AutoModelConfigPlugin.setup(mockCtx)
+    await setupPlugin(mockCtx)
     expect(transformCallback).toBeDefined()
     transformCallback!(mockEditor)
 
@@ -244,7 +244,7 @@ describe("costMapping regressions", () => {
         },
       },
     }
-    await AutoModelConfigPlugin.setup(ctx)
+    await setupPlugin(ctx)
     expect(transformCallback).toBeDefined()
     transformCallback!(editorFor(models, listCalls))
     expect(listCalls.n).toBe(0)

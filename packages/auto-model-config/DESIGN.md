@@ -50,9 +50,10 @@ export const AutoModelConfigPlugin = Plugin.define({
 要点：
 
 - 插件对象是 `{ id, setup }`，`id` 固定为 `opencode-auto-model-config`
-- `setup(ctx)` 为**异步**：在插件启动阶段完成文件 I/O（读取 `oc-auto-model-config.jsonc` / `oc-auto-model-config.json`、`models-dev.json`）与映射解析
+- `setup(ctx)` 为**异步**：读取初始配置与 models.dev 数据，并注册配置监听与同步 transform
 - `ctx.model.transform(editor => ...)` 注册的回调是**同步**的：只在内存 editor 上补全字段，不做任何 I/O
-- 绝不在 setup 之外持有异步状态；transform 回调依赖 setup 阶段解析好的数据
+- 配置变更时在 transform 之外异步构造完整快照，原子替换当前快照后调用 `ctx.model.reload()`；transform 每次只读取当前内存快照
+- transform 只注册一次；V2 reload 从宿主基底重放现有 transforms，不重新执行 setup。卸载时释放插件自己的监听与待执行刷新
 
 ### 3.2 工作流
 
@@ -67,7 +68,13 @@ setup(ctx):
      语义无效（无可用 mapping / costMapping）：停止查找并返回 null。
   2. 读取 models-dev.json（TTL 24h；缺失/过期则下载，失败降级过期缓存）
   3. 按 mapping 解析每个 provider 的目标模型元数据
-  4. ctx.model.transform(editor => ...) 注册同步增强回调
+   4. ctx.model.transform(editor => ...) 注册同步增强回调
+   5. 监听项目与全局配置候选文件，包括尚未创建的文件
+
+配置创建 / 修改 / 删除：
+  合并连续事件 → 串行异步读取配置与缓存、解析映射
+  → 原子替换快照 → ctx.model.reload()
+  无可用配置时切换为空快照；冷启动无配置也保留监听与 transform
 
 transform(editor):
   对每个已解析的 mapping provider/model：
