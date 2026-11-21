@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
@@ -63,6 +63,36 @@ describe("loadConfig", () => {
       "claude-code": { "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6" },
     })
     expect(result!.override).toBeUndefined()
+  })
+
+  it("parses object criteria for mapping and costMapping, ignoring invalid entries", async () => {
+    const criteria = { name: "Hy4 flash", canonical_model_id: "tencent/hy4-flash" }
+    await fs.writeFile(
+      path.join(projectDir, "oc-auto-model-config.json"),
+      JSON.stringify({
+        mapping: { custom: { valid: criteria, string: "kenari/hy4-flash", bad: { name: 123 }, empty: {}, array: ["name"] } },
+        costMapping: { custom: { valid: criteria, bad: { name: true }, empty: {} } },
+      }),
+    )
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const result = await loadConfig({ projectDirectory: projectDir, homeDirectory: fakeHome })
+      expect(result!.mapping).toEqual({ custom: { valid: criteria, string: "kenari/hy4-flash" } })
+      expect(result!.costMapping).toEqual({ custom: { valid: criteria } })
+      expect(getMappingTarget(result!, "custom", "valid")).toEqual(criteria)
+      expect(warn.mock.calls.some(([message]) => String(message).includes("3 invalid mapping entries"))).toBe(true)
+      expect(warn.mock.calls.some(([message]) => String(message).includes("2 invalid costMapping entries"))).toBe(true)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("returns null if neither mapping has valid entries", async () => {
+    await fs.writeFile(
+      path.join(projectDir, "oc-auto-model-config.json"),
+      JSON.stringify({ mapping: { custom: { empty: {} } }, costMapping: { custom: { broken: { name: 1 } } } }),
+    )
+    expect(await loadConfig({ projectDirectory: projectDir, homeDirectory: fakeHome })).toBeNull()
   })
 
   it("keeps a valid mapping when costMapping is invalid", async () => {

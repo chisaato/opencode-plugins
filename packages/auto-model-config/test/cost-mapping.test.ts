@@ -323,6 +323,27 @@ describe("costMapping regressions", () => {
     expect(model.cost).toEqual(expectedTiered)
   })
 
+  it("uses object conditions for costMapping and keeps metadata resolvedSource in dump", async () => {
+    const model = priced("claude-sonnet-4-6")
+    const criteria = { name: "CLAUDE SONNET 4.6", provider: "ANTHROPIC" }
+    await run(
+      {
+        mapping: { "claude-code": { "claude-sonnet-4-6": { name: "Claude Sonnet 4.6", provider: "anthropic" } } },
+        costMapping: { "claude-code": { "claude-sonnet-4-6": criteria } },
+        debug: { enabled: true, dumpPath },
+      },
+      { "claude-code": { "claude-sonnet-4-6": model } },
+    )
+    expect(model.cost).toEqual(expectedTiered)
+    await vi.waitFor(async () => {
+      const dump = JSON.parse(await fs.readFile(dumpPath, "utf-8"))
+      const entry = dump.provider["claude-code"].models["claude-sonnet-4-6"]
+      expect(entry._source).toBe(JSON.stringify({ name: "Claude Sonnet 4.6", provider: "anthropic" }))
+      expect(entry._resolvedSource).toBe("anthropic/claude-sonnet-4-6")
+      expect(entry._costSource).toBe(JSON.stringify(criteria))
+    })
+  })
+
   it("still applies mapping metadata first when override.cost is true, then replaces only cost", async () => {
     const { Model } = await import("@opencode/plugin")
     const model: any = Model.Info.default("claude-code" as any, "claude-sonnet-4-6" as any)

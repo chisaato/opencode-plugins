@@ -66,6 +66,25 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 }
 ```
 
+目标既能写 `provider/model`（如 `openai/gpt-4o`），也能写 models.dev 的 `canonical_model_id`（如 `tencent/hy4-flash`）。后者用于官方 provider 未出现在 models.dev provider 表里的情况：插件会遍历所有 provider，找 `canonical_model_id` 相同的条目作为数据来源。多个候选时依次按「模型 key 等于 canonical 最后一段」→「provider id 等于 canonical 第一段」→ provider id 字母序选取，结果确定。命中 canonical 时，debug dump 的 `_source` 仍显示你配置的 canonical id，`_resolvedSource` 显示实际命中的 `provider/model`。
+
+右侧也可以写成对象，进入**精确条件模式**：对象的每个字段都是匹配条件（AND），按 models.dev 条目的同名字段做大小写不敏感的字符串比较；`provider` 是特殊字段，用来限定 provider id。条件字段在 models.dev 条目中必须存在且为字符串才会命中（如 `limit`、`cost`、`modalities` 这类非字符串字段不能作为条件）。
+
+```jsonc
+{
+	"mapping": {
+		"your-provider-name": {
+			"hy4-flash": {
+				"name": "Hy4 flash",
+				"canonical_model_id": "tencent/hy4-flash"
+			}
+		}
+	}
+}
+```
+
+对象模式的候选排序、无匹配 warning、`_resolvedSource` 行为与字符串模式一致；debug dump 的 `_source` 会显示整个条件对象的 JSON。`costMapping` 也支持同样的两种写法。
+
 ### 示例
 
 假设你的 OpenCode V2 配置中有：

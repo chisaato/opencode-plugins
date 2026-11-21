@@ -10,6 +10,7 @@ export interface ConfigDumperOptions extends NonNullable<AutoModelConfig["debug"
 
 export interface EnhancedModelResult {
   source: string
+  resolvedSource?: string
   filledFields: string[]
   warning?: string
   skipped?: boolean
@@ -53,6 +54,7 @@ export class ConfigDumper {
           _source: res.source,
           _filled: res.filledFields,
         }
+        if (res.resolvedSource) entry._resolvedSource = res.resolvedSource
         if (res.costSource) entry._costSource = res.costSource
         if (res.costWarning) entry._costWarning = res.costWarning
 

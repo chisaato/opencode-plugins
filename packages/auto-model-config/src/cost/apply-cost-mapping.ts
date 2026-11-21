@@ -1,4 +1,4 @@
-import type { ModelsDevData } from "../types"
+import type { ModelsDevData, ModelMatchCriteria } from "../types"
 import type { EnhancedModelResult } from "../debug/config-dumper"
 import { resolveSourceTarget } from "../mapping/resolver"
 import { costArrayFromModelsDev, hasNumericCost } from "../utils/fields-mapper"
@@ -22,18 +22,19 @@ export interface CostMappingEditor {
 export function applyCostMapping(
   editor: CostMappingEditor,
   modelsDev: ModelsDevData,
-  costMapping: Record<string, Record<string, string>>,
+  costMapping: Record<string, Record<string, string | ModelMatchCriteria>>,
   enhancedModels: Record<string, Record<string, EnhancedModelResult>>,
 ): void {
   for (const [providerID, models] of Object.entries(costMapping)) {
     const providerExists = editor.provider.get(providerID) != null
     for (const [modelID, target] of Object.entries(models)) {
+      const source = typeof target === "string" ? target : JSON.stringify(target)
       if (!providerExists) {
         record(enhancedModels, providerID, modelID, {
-          source: target,
+          source,
           filledFields: [],
           skipped: true,
-          costSource: target,
+          costSource: source,
           costWarning: `Provider "${providerID}" not found in editor`,
         })
         continue
@@ -41,10 +42,10 @@ export function applyCostMapping(
 
       if (editor.get(providerID, modelID) == null) {
         record(enhancedModels, providerID, modelID, {
-          source: target,
+          source,
           filledFields: [],
           skipped: true,
-          costSource: target,
+          costSource: source,
           costWarning: `Model "${modelID}" not found in editor`,
         })
         continue
@@ -52,24 +53,24 @@ export function applyCostMapping(
 
       const lookedUp = resolveSourceTarget(modelsDev, target)
       if (lookedUp.warning || !lookedUp.modelData) {
-        const warning = lookedUp.warning ?? `Model target "${target}" could not be resolved`
+        const warning = lookedUp.warning ?? `Model target "${source}" could not be resolved`
         record(enhancedModels, providerID, modelID, {
-          source: target,
+          source,
           filledFields: [],
           warning,
-          costSource: target,
+          costSource: source,
           costWarning: warning,
         })
         continue
       }
 
       if (!hasNumericCost(lookedUp.modelData.cost)) {
-        const warning = `Source "${target}" has no cost`
+        const warning = `Source "${source}" has no cost`
         record(enhancedModels, providerID, modelID, {
-          source: target,
+          source,
           filledFields: [],
           warning,
-          costSource: target,
+          costSource: source,
           costWarning: warning,
         })
         continue
@@ -80,10 +81,10 @@ export function applyCostMapping(
         model.cost = cost
       })
       record(enhancedModels, providerID, modelID, {
-        source: target,
+        source,
         filledFields: ["cost"],
         model: editor.get(providerID, modelID) as Record<string, unknown> | undefined,
-        costSource: target,
+        costSource: source,
       })
     }
   }

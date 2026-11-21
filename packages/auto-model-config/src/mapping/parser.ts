@@ -1,6 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
-import type { AutoModelConfig } from "../types"
+import type { AutoModelConfig, ModelMatchCriteria } from "../types"
 import { getGlobalConfigDir, type PathResolutionOptions } from "../utils/paths"
 import { parseJsonc } from "./jsonc"
 
@@ -45,7 +45,7 @@ function parseAutoModelConfig(
     return null
   }
 
-  const mapping = parseStringMapping(raw.mapping)
+  const mapping = parseStringMapping(raw.mapping, configPath, "mapping")
   const costMapping = parseCostMapping(raw.costMapping, configPath)
   // 历史行为：没有非空 metadata mapping 且没有可用 costMapping 时不启用。
   // override.cost 单独出现不能启用插件，也不能代替 costMapping。
@@ -66,46 +66,58 @@ function parseAutoModelConfig(
   }
 }
 
-function parseStringMapping(raw: unknown): Record<string, Record<string, string>> | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
-  if (Object.keys(raw).length === 0) return undefined
-  return raw as Record<string, Record<string, string>>
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const prototype: unknown = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
-function parseCostMapping(
+function parseStringMapping(
   raw: unknown,
   configPath: string,
-): Record<string, Record<string, string>> | undefined {
-  if (raw === undefined) return undefined
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    console.warn(`[auto-model-config] Invalid costMapping in ${configPath}`)
+  kind: "mapping" | "costMapping",
+): Record<string, Record<string, string | ModelMatchCriteria>> | undefined {
+  if (!isPlainObject(raw)) {
+    if (kind === "costMapping" && raw !== undefined) {
+      console.warn(`[auto-model-config] Invalid costMapping in ${configPath}`)
+    }
     return undefined
   }
 
-  const result: Record<string, Record<string, string>> = {}
+  const result: Record<string, Record<string, string | ModelMatchCriteria>> = {}
   let invalid = 0
   for (const [provider, models] of Object.entries(raw)) {
-    if (!models || typeof models !== "object" || Array.isArray(models)) {
+    if (!isPlainObject(models)) {
       invalid++
       continue
     }
-    const entries: Record<string, string> = {}
+    const entries: Record<string, string | ModelMatchCriteria> = {}
     for (const [modelId, target] of Object.entries(models)) {
-      if (typeof target !== "string" || target.length === 0) {
+      if (typeof target === "string" && target.length > 0) {
+        entries[modelId] = target
+      } else if (isPlainObject(target) && Object.keys(target).length > 0
+        && Object.values(target).every((value) => typeof value === "string")) {
+        entries[modelId] = target as ModelMatchCriteria
+      } else {
         invalid++
-        continue
       }
-      entries[modelId] = target
     }
     if (Object.keys(entries).length > 0) result[provider] = entries
   }
 
   if (invalid > 0) {
     console.warn(
-      `[auto-model-config] Ignored ${invalid} invalid costMapping entr${invalid === 1 ? "y" : "ies"} in ${configPath}`,
+      `[auto-model-config] Ignored ${invalid} invalid ${kind} entr${invalid === 1 ? "y" : "ies"} in ${configPath}`,
     )
   }
   return Object.keys(result).length > 0 ? result : undefined
+}
+
+function parseCostMapping(
+  raw: unknown,
+  configPath: string,
+): Record<string, Record<string, string | ModelMatchCriteria>> | undefined {
+  return parseStringMapping(raw, configPath, "costMapping")
 }
 
 function parseOverrideConfig(rawOverride: any, rawOverrideCost: any): AutoModelConfig["override"] {
@@ -142,6 +154,6 @@ export function getMappingTarget(
   config: AutoModelConfig,
   provider: string,
   modelId: string,
-): string | null {
+): string | ModelMatchCriteria | null {
   return config.mapping[provider]?.[modelId] ?? null
 }

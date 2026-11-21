@@ -24,7 +24,8 @@ describe("V2 ConfigDumper statistics and diffOnly", () => {
     const enhancedModels = {
       "custom-provider": {
         "gpt-4o-filled": {
-          source: "openai/gpt-4o",
+          source: "canonical/gpt-4o",
+          resolvedSource: "openai/gpt-4o",
           filledFields: ["family", "cost"],
           model: {
             name: "Explicit User Name",
@@ -61,9 +62,12 @@ describe("V2 ConfigDumper statistics and diffOnly", () => {
     expect(filledEntry.cost).toBeDefined()
     expect(filledEntry.name).toBeUndefined()
     expect(filledEntry._filled).toEqual(["family", "cost"])
+    expect(filledEntry._source).toBe("canonical/gpt-4o")
+    expect(filledEntry._resolvedSource).toBe("openai/gpt-4o")
 
     const skippedEntry = parsed.provider["custom-provider"].models["gpt-4o-skipped"]
     expect(skippedEntry._skipped).toBe(true)
+    expect(skippedEntry._resolvedSource).toBeUndefined()
 
     const warnEntry = parsed.provider["custom-provider"].models["gpt-4o-warn"]
     expect(warnEntry._warning).toBe("Model not found")

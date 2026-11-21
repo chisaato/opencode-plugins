@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { resolveModel, resolveProviderModels } from "../src/mapping/resolver"
+import { resolveModel, resolveProviderModels, resolveSourceTarget } from "../src/mapping/resolver"
 import type { ModelsDevData, AutoModelConfig } from "../src/types"
 
 // 模拟真实 models.dev 结构的测试夹具
@@ -302,5 +302,155 @@ describe("resolveModel with isolated fixture data", () => {
     expect(result!.warning).toContain("not found")
     expect(result!.filledFields).toHaveLength(0)
     expect(result!.modelData).toEqual({})
+  })
+})
+
+describe("canonical_model_id 回退", () => {
+  const base = testData.openai.models["gpt-4o"]
+  const canonical = "tencent/hy4-flash"
+  const fixture: ModelsDevData = {
+    zeta: {
+      id: "zeta", name: "Zeta", npm: "test", env: [],
+      models: { "hy4-flash": { ...base, id: "hy4-flash", name: "Zeta", canonical_model_id: canonical } },
+    },
+    kenari: {
+      id: "kenari", name: "Kenari", npm: "test", env: [],
+      models: {
+        "other-key": { ...base, id: "other-key", name: "Other", canonical_model_id: canonical },
+        "hy4-flash": { ...base, id: "hy4-flash", name: "Kenari", canonical_model_id: canonical },
+      },
+    },
+  }
+  const config = (target: string): AutoModelConfig => ({
+    mapping: { custom: { flash: target } },
+  })
+
+  it("按 canonical 精确命中并填充元数据", () => {
+    const result = resolveModel(fixture, config(canonical), "custom", "flash")!
+    expect(result.source).toBe(canonical)
+    expect(result.resolvedSource).toBe("kenari/hy4-flash")
+    expect(result.modelData.name).toBe("Kenari")
+    expect(result.filledFields).toEqual(expect.arrayContaining(["name", "family", "capabilities", "limit", "cost"]))
+  })
+
+  it("canonical 大小写不敏感匹配", () => {
+    const result = resolveModel(fixture, config("TENCENT/HY4-FLASH"), "custom", "flash")!
+    expect(result.source).toBe("TENCENT/HY4-FLASH")
+    expect(result.resolvedSource).toBe("kenari/hy4-flash")
+    expect(result.modelData.name).toBe("Kenari")
+  })
+
+  it("先选匹配模型 key，再选匹配 provider，最后按 provider 字母序", () => {
+    const withProvider: ModelsDevData = {
+      ...fixture,
+      tencent: {
+        id: "tencent", name: "Tencent", npm: "test", env: [],
+        models: { "another-key": { ...base, id: "another-key", canonical_model_id: canonical } },
+      },
+    }
+    // tencent 的 provider 优先级不能越过匹配的 model key。
+    expect(resolveSourceTarget(withProvider, canonical).resolvedSource).toBe("kenari/hy4-flash")
+    const withMatchingProvider: ModelsDevData = {
+      ...withProvider,
+      tencent: {
+        ...withProvider.tencent,
+        models: { "hy4-flash": { ...base, id: "hy4-flash", canonical_model_id: canonical } },
+      },
+    }
+    // provider 存在但未精确命中时才进行 canonical 回退。
+    expect(resolveSourceTarget(withMatchingProvider, "TENCENT/hy4-flash").resolvedSource).toBe("tencent/hy4-flash")
+  })
+
+  it("provider/model 直接命中优先于 canonical", () => {
+    const direct: ModelsDevData = {
+      ...fixture,
+      tencent: {
+        id: "tencent", name: "Tencent", npm: "test", env: [],
+        models: { "hy4-flash": { ...base, id: "hy4-flash", name: "Direct" } },
+      },
+    }
+    const result = resolveModel(direct, config(canonical), "custom", "flash")!
+    expect(result.modelData.name).toBe("Direct")
+    expect(result.resolvedSource).toBeUndefined()
+  })
+
+  it("canonical 无匹配时保留原 warning 且零填充", () => {
+    const missingProvider = resolveModel(fixture, config("missing/hy4-flash"), "custom", "flash")!
+    expect(missingProvider.warning).toBe('Provider "missing" not found in models.dev data')
+    expect(missingProvider.filledFields).toEqual([])
+    expect(missingProvider.resolvedSource).toBeUndefined()
+    const missingModel = resolveModel(fixture, config("kenari/not-found"), "custom", "flash")!
+    expect(missingModel.warning).toBe('Model "not-found" not found in provider "kenari"')
+    expect(missingModel.filledFields).toEqual([])
+  })
+})
+
+describe("对象条件映射", () => {
+  const base = testData.openai.models["gpt-4o"]
+  const canonical = "tencent/hy4-flash"
+  const fixture: ModelsDevData = {
+    zeta: {
+      id: "zeta", name: "Zeta", npm: "test", env: [],
+      models: {
+        "hy4-flash": { ...base, id: "hy4-flash", name: "Hy4 flash", family: "other", canonical_model_id: canonical },
+      },
+    },
+    kenari: {
+      id: "kenari", name: "Kenari", npm: "test", env: [],
+      models: {
+        "other": { ...base, id: "other", name: "Hy4 flash", canonical_model_id: canonical },
+        "hy4-flash": { ...base, id: "hy4-flash", name: "Hy4 flash", canonical_model_id: canonical },
+      },
+    },
+  }
+  const config: AutoModelConfig = {
+    mapping: { custom: {
+      object: { name: "HY4 FLASH", canonical_model_id: canonical },
+      string: canonical,
+    } },
+  }
+
+  it("name + canonical 条件命中并透传来源，字符串模式不受影响", () => {
+    const object = resolveModel(fixture, config, "custom", "object")!
+    const string = resolveModel(fixture, config, "custom", "string")!
+    expect(object.source).toBe(JSON.stringify(config.mapping.custom.object))
+    expect(object.resolvedSource).toBe("kenari/hy4-flash")
+    expect(object.filledFields).toContain("cost")
+    expect(string.source).toBe(canonical)
+    expect(string.resolvedSource).toBe("kenari/hy4-flash")
+  })
+
+  it("provider 限定大小写不敏感，多字段按 AND 匹配", () => {
+    expect(resolveSourceTarget(fixture, { provider: "ZETA", name: "hy4 flash", canonical_model_id: canonical })
+      .resolvedSource).toBe("zeta/hy4-flash")
+    expect(resolveSourceTarget(fixture, { name: "Hy4 flash", family: "gpt", canonical_model_id: canonical })
+      .resolvedSource).toBe("kenari/hy4-flash")
+    // limit 在 models.dev 里是对象，不能作为字符串条件，应判为无匹配而不是忽略条件。
+    expect(resolveSourceTarget(fixture, { name: "Hy4 flash", limit: "ignored", canonical_model_id: canonical })
+      .resolvedSource).toBeUndefined()
+  })
+
+  it("条件独立于字符串的 provider/model 匹配并按 provider 字母序决胜", () => {
+    const direct: ModelsDevData = {
+      ...fixture,
+      tencent: {
+        id: "tencent", name: "Tencent", npm: "test", env: [],
+        models: {
+          "hy4-flash": { ...base, id: "hy4-flash", name: "Different name", canonical_model_id: canonical },
+        },
+      },
+    }
+    expect(resolveSourceTarget(direct, canonical).resolvedSource).toBeUndefined()
+    expect(resolveSourceTarget(direct, { name: "Hy4 flash", canonical_model_id: canonical }).resolvedSource)
+      .toBe("kenari/hy4-flash")
+  })
+
+  it("无匹配时明确 warning，filledFields 为空", () => {
+    const result = resolveModel(fixture, { mapping: { custom: {
+      object: { name: "missing", canonical_model_id: canonical },
+    } } }, "custom", "object")!
+    expect(result.warning).toContain("No models.dev entry matches criteria")
+    expect(result.filledFields).toEqual([])
+    expect(result.resolvedSource).toBeUndefined()
   })
 })

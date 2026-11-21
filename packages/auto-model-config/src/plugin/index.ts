@@ -249,6 +249,7 @@ export const AutoModelConfigPlugin = Plugin.define({
           if (!existingModel) {
             enhancedModels[providerName][modelId] = {
               source: resolved.source,
+              resolvedSource: resolved.resolvedSource,
               filledFields: [],
               skipped: true,
             }
@@ -296,6 +297,7 @@ export const AutoModelConfigPlugin = Plugin.define({
 
           enhancedModels[providerName][modelId] = {
             source: resolved.source,
+            resolvedSource: resolved.resolvedSource,
             filledFields: actuallyFilledFields,
             model: editor.get(providerName, modelId) as unknown as Record<string, unknown>,
           }

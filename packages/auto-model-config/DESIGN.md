@@ -174,7 +174,11 @@ src/
 - `"gpt-4o": "openai/gpt-4o"` → 从 `models.dev[openai].models[gpt-4o]` 取元数据
 - 支持模型 ID 内再含 `/`（如 `"openai/gpt-4o": "openrouter/openai/gpt-4o"`）
 - 先精确匹配，再大小写不敏感匹配（同时检查字典 key 与条目的 `id` 字段）
-- 目标为 `provider/model` 形式；缺 `/`、provider 不存在、model 不存在都会产出 warning
+- 目标也可写 `canonical_model_id`（如 `tencent/hy4-flash`），用于官方 provider 没出现在 models.dev provider 表里的情况；按精确查找失败后才回退，遍历全部 provider 比较条目的 `canonical_model_id`（先精确、再大小写不敏感）
+- canonical 有多个候选时，依次按「模型 key 等于 canonical 最后一段」→「provider id 等于 canonical 第一段」→ provider id 字母序选取，保证结果确定；回退命中时 `ResolvedModel.source` 保留用户填写的 canonical id，新增 `resolvedSource` 记录实际命中的 `provider/model`，debug dump 里显示为 `_resolvedSource`
+- 目标为 `provider/model` 形式时；缺 `/`、provider 不存在、model 不存在（且 canonical 回退也无匹配）都会产出 warning
+- 目标也可以是对象（`ModelMatchCriteria`），进入精确条件模式：每个字段都是 AND 条件，和 models.dev 条目的同名字段做大小写不敏感的字符串比较；`provider` 为特殊字段限定 provider id；模型条目中不存在、或非字符串的同名字段（如 `limit`/`cost`/`modalities`）不能满足条件。候选排序与无匹配 warning 语义和字符串模式一致。对象模式下 `ResolvedModel.source` 为条件的 JSON 串，`resolvedSource` 仍是实际命中的 `provider/model`
+- `mapping` 与 `costMapping` 共用上述两种目标形式；简单模式与精确条件模式可混用
 
 ### 4.4 costMapping（仅价格，手填）
 

@@ -25,6 +25,7 @@ export interface ModelsDevProvider {
  */
 export interface ModelsDevModel {
   id: string
+  canonical_model_id?: string
   name: string
   family?: string
   attachment: boolean
@@ -65,6 +66,9 @@ export interface ModelsDevCost {
   }
 }
 
+/** models.dev 模型条目的字符串条件；provider 限定 provider id */
+export type ModelMatchCriteria = Record<string, string>
+
 /**
  * 插件配置（来自 oc-auto-model-config.jsonc 或 oc-auto-model-config.json）
  */
@@ -74,12 +78,12 @@ export interface AutoModelConfig {
   /** 自定义缓存路径；null/未设置时使用 XDG 配置目录下的 models-dev.json */
   cachePath?: string | null
   /** 映射关系：provider -> { modelId -> "modelsdev-provider/modelsdev-modelId" } */
-  mapping: Record<string, Record<string, string>>
+  mapping: Record<string, Record<string, string | ModelMatchCriteria>>
   /**
    * 仅价格映射，结构与 mapping 相同。
    * 只覆盖列出的模型的 cost，不依赖 override.cost，也不扫描未列出的模型。
    */
-  costMapping?: Record<string, Record<string, string>>
+  costMapping?: Record<string, Record<string, string | ModelMatchCriteria>>
   /** 调试模式配置 */
   debug?: DebugConfig
   /** 覆盖行为配置 */
@@ -112,6 +116,8 @@ export interface DebugConfig {
 export interface ResolvedModel {
   /** models.dev 中的数据源（如 "opencode-go/gpt-5.4"） */
   source: string
+  /** canonical 回退实际命中的 provider/model key；精确查找时不设置 */
+  resolvedSource?: string
   /** 完整的 models.dev 模型数据 */
   modelData: ModelsDevModel
   /** 需要填充到 OpenCode V2 模型元数据中的字段 */
