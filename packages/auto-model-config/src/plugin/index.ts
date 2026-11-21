@@ -215,11 +215,14 @@ export const AutoModelConfigPlugin = Plugin.define({
       for (const file of files) unwatchFile(file, changed)
     }
 
-    await refresh(true)
-    ready = true
-
     // 只注册一次：宿主 reload 重建干净模型基底并按序重放 transform，不重新执行 setup。
     // transform 由宿主 Scope 自动释放；cleanup 只清理插件自有的监听和计时器。
+    //
+    // 必须先于 refresh 注册：宿主按注册顺序重放 transform，排在本插件之后的插件
+    // （如 opencode-dcp）会在自己的 transform 里缓存 model.limit.context；若本插件
+    // 注册更晚，它们每轮重放都先读后填，永远拿到 Model.Info.default 的默认 limit
+    // （context=200000/output=32000），reload 也无法纠正（重放顺序不随 reload 改变）。
+    // snapshot 未就绪时 callback 直接跳过（见下方 !snapshot 防护）。
     await Promise.resolve(ctx.model.transform((editor) => {
       if (disposed || !snapshot) return
       const { pluginConfig, modelsDev, allResolved, cacheAge, dumper } = snapshot
@@ -319,6 +322,22 @@ export const AutoModelConfigPlugin = Plugin.define({
       cleanup()
       throw error
     })
+
+    await refresh(true)
+    ready = true
+
+    // 初始填充只落在本轮 transform 产物上；对排在本插件之后的 transform（如
+    // opencode-dcp 的 limit 缓存）而言，填充前的默认值可能在早先一轮已被读过。
+    // 显式 reload 一轮，让已填充的基底按注册顺序完整重放，后续插件才能拿到真实
+    // limit 而非 Model.Info.default 的默认值。
+    if (snapshot && !disposed) {
+      try {
+        await ctx.model.reload()
+      } catch (error) {
+        report(error)
+      }
+    }
+
     return cleanup
   },
 })

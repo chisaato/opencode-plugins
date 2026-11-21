@@ -41,6 +41,30 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 }
 ```
 
+### 插件顺序约束：依赖模型元数据的插件必须排在本插件之后
+
+> **TL;DR：任何会读取模型元数据（`limit` / `cost` / `capabilities` 等）的插件，在 `plugins` 数组里必须排在本插件之后。**
+
+宿主按 `plugins` 数组顺序串行执行各插件的 `setup`，并按 **transform 注册顺序**重放模型变换。本插件通过 `ctx.model.transform` 向模型填充元数据，因此：
+
+- 排在本插件**之后**的插件：每轮重放时先看到本插件填充好的值，读到真实的 `limit` 等元数据。
+- 排在本插件**之前**的插件：每轮重放都先于本插件执行，只能读到 `Model.Info.default` 的默认值（例如 `limit.context = 200000` / `limit.output = 32000`）。本插件随后填充的真实值对它们不可见，而且 **`ctx.model.reload()` 也无法纠正**——reload 重建的是干净基底并按同一顺序重放，先读后填的相对顺序不会改变。
+
+典型受害者是像 [opencode-dcp](https://github.com/tarquinen/opencode-dcp) 这类在初始化时缓存 `model.limit.context` 的插件：它若排在本插件之前，会一直拿着默认的 200000 作为模型上下文窗口，导致上下文用量百分比与阈值判断严重失真。
+
+正确示例：
+
+```json
+{
+	"plugins": [
+		"@misakacloud/opencode-auto-model-config@1.4.1",
+		"@tarquinen/opencode-dcp@3.2.1"
+	]
+}
+```
+
+本插件自身也会在初始填充完成后主动触发一次 `ctx.model.reload()`，让填充后的基底立即完整重放一轮，尽力缩短后续插件读到默认值的时间窗；但这只是对非常规加载时序的加固，**不能替代数组顺序约束**。
+
 ## 配置
 
 插件支持 `oc-auto-model-config.jsonc` 与 `oc-auto-model-config.json`。同一目录里只要有 `.jsonc` 就用它，不再读同目录的 `.json`。查找顺序：

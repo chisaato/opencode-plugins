@@ -158,7 +158,9 @@ describe("模型列表配置热重载", () => {
     await write(configPath, "1")
     changed(); changed()
     release(data)
-    await eventually(() => expect(reload).toHaveBeenCalledTimes(1))
+    // 初始 refresh 后 setup 会主动 reload 一次（让后续插件的 transform 读到填充值），
+    // 因此这里是第 2 次 reload：等待合并后的刷新完成。
+    await eventually(() => expect(reload).toHaveBeenCalledTimes(2))
     expect(get).toHaveBeenCalledTimes(2)
     expect(model.name).toBe("Model 1")
     get.mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
@@ -168,7 +170,8 @@ describe("模型列表配置热重载", () => {
     expect(unwatch).toHaveBeenCalledTimes(4)
     release(data)
     await new Promise((resolve) => setTimeout(resolve, 150))
-    expect(reload).toHaveBeenCalledTimes(1)
+    // 初始 reload(1) + 合并刷新后的 reload(2)；cleanup 已取消监听且 dispose 掉在途刷新。
+    expect(reload).toHaveBeenCalledTimes(2)
     // 已经捕获的 transform 也不会在 dispose 后增强模型。
     apply()
     expect(model.name).toBe("model")
