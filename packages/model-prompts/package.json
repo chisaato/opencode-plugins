@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@misakacloud/opencode-model-prompts",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin: inject ordered prompt files into system context per model and optional agent/tool filters",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "files": ["src", "index.ts", "README.md", "LICENSE"],
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run", "build": "tsc --noEmit" },
+  "dependencies": { "@opencode/plugin": "^2.0.31" },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chisaato/opencode-plugins.git",
+    "directory": "packages/model-prompts"
+  },
+  "author": "chisaato",
+  "license": "MIT",
+  "publishConfig": { "access": "public", "provenance": true }
+}

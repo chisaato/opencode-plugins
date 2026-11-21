@@ -37,6 +37,7 @@
 - `@misakacloud/opencode-auto-model-config`
 - `@misakacloud/opencode-skill-filter`
 - `@misakacloud/opencode-auto-retry`
+- `@misakacloud/opencode-model-prompts`
 
 ## 历史迁移
 
