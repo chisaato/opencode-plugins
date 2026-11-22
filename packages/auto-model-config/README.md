@@ -4,8 +4,6 @@
 
 OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 provider 自动填充模型元数据。
 
->  寻找适用于 Pi Coder 的版本? 
-
 ## 介绍
 
 当你在 OpenCode 中配置自定义 provider（如 OpenAI 兼容 API、第三方模型服务）时，需要手动填写模型的详细信息（上下文窗口、能力、费用等）。这个插件可以自动从 models.dev 获取这些元数据，并填充到你的 OpenCode 配置中。
@@ -30,7 +28,7 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 
 ```json
 {
-	"plugins": ["@misakacloud/opencode-auto-model-config@0.3.0"],
+	"plugins": ["@misakacloud/opencode-auto-model-config@latest"],
 	"providers": {
 		"my-openai": {
 			"models": {
@@ -38,6 +36,29 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 			}
 		}
 	}
+}
+```
+
+### 本地路径安装
+
+OpenCode V2 加载目录型插件时解析包目录根部的 `index.ts`（转发到 `src/index.ts`），不读取 `package.json` 的 `main` 作为目录入口。将示例绝对路径换成本机实际路径，任选一种形式，不要与发布包重复安装：
+
+```jsonc
+{
+  "plugins": ["/data/SourceCode/opencode-plugins/packages/auto-model-config"]
+}
+```
+
+也可写 `{ package, options }`；本插件**不支持内联 options（不读取 `ctx.options`），仅从配置文件读取**，因此 `options` 只能为空，映射须写在 `oc-auto-model-config.jsonc` 或 `.json`：
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "/data/SourceCode/opencode-plugins/packages/auto-model-config",
+      "options": {}
+    }
+  ]
 }
 ```
 
@@ -57,7 +78,7 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 ```json
 {
 	"plugins": [
-		"@misakacloud/opencode-auto-model-config@1.4.1",
+		"@misakacloud/opencode-auto-model-config@latest",
 		"@tarquinen/opencode-dcp@3.2.1"
 	]
 }
@@ -181,10 +202,10 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 {
 	"mapping": {},
 	"cacheTTL": 86400,
-	"cachePath": "~/.config/opencode/models-dev.json",
+	"cachePath": "./models-dev.json",
 	"debug": {
 		"enabled": false,
-		"dumpPath": "~/.config/opencode/expanded-config.json",
+		"dumpPath": "./expanded-config.json",
 		"diffOnly": true
 	},
 	"override": {
@@ -192,6 +213,8 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 	}
 }
 ```
+
+**路径警示：**`cachePath` 与 `debug.dumpPath` 仅支持相对路径（OpenCode 在项目根运行时相对项目根）或绝对路径，不支持 `~`；代码把相对路径直接交给文件系统，实际基准是 OpenCode 进程工作目录，而非自动解析成项目根。这里使用 `./` 示范相对路径；若进程工作目录不确定，请改用绝对路径。省略时分别使用全局配置目录下的 `models-dev.json`、`expanded-config.json`。
 
 - `mapping`: 完整元数据映射。与 `costMapping` 至少要有一组非空；只有空 `mapping`、或只写 `override.cost` 时插件不启用
 - `costMapping`: 手填的仅价格映射，结构与 `mapping` 相同。只处理列出来的模型，且只覆盖 `cost`
@@ -233,3 +256,9 @@ OpenCode 插件：根据 [models.dev](https://models.dev) 数据为自定义 pro
 - `costMapping` 是显式覆盖，不看 `override.cost`
 - 源 provider/模型不存在，或源条目没有数字 `cost` 时，保留原来的 `cost`，并在 debug dump 里写 `_costWarning`
 - 填进去的是 models.dev 的估价，不是服务商账单。OpenRouter、kilo、newapi、Copilot、OpenCode Go 等聚合或跨厂商订阅不会被自动处理；要估价就自己写一条映射
+
+## 卸载与禁用
+
+从 `opencode.json` / `opencode.jsonc` 的 `plugins` 数组移除包名或本地路径条目，重启 OpenCode 即卸载。临时禁用填充可移走所选配置文件，或移除其中所有有效的 `mapping` / `costMapping`（插件在没有可用映射时不启用填充；仍会监听文件变化）。映射配置可能位于项目根目录 `oc-auto-model-config.jsonc` / `.json` 或全局 `~/.config/opencode/oc-auto-model-config.jsonc` / `.json`（遵循 `XDG_CONFIG_HOME`），不会自动删除。
+
+models.dev 缓存默认是 `~/.config/opencode/models-dev.json`（设置 `XDG_CONFIG_HOME` 时为 `$XDG_CONFIG_HOME/opencode/models-dev.json`）；启用调试后 dump 默认是同目录的 `expanded-config.json`。卸载不要求清理缓存或 dump；若不再需要这些数据可手动删除对应文件。指定过 `cachePath` / `debug.dumpPath` 时，应检查自己指定的实际路径。

@@ -7,6 +7,7 @@
   "main": "./src/index.ts",
   "exports": { ".": "./src/index.ts" },
   "files": ["src", "index.ts", "README.md", "LICENSE"],
+  "keywords": ["opencode", "plugin", "model-prompts"],
   "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run", "build": "tsc --noEmit" },
   "dependencies": { "@opencode/plugin": "^2.0.31" },
   "devDependencies": {

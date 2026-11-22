@@ -26,7 +26,7 @@
 
 `publish` job 使用 GitHub Environment `npm-publish`。可以在仓库 Settings → Environments → `npm-publish` 里添加 Required reviewers，让真正发布前先等人批准。不创建、不配置这个 environment 也不会挡住发布。手动运行且 `dry_run` 为 true 时，若提交还不在 `main` 历史上，只会警告，不会失败。若在 npmjs 的可信发布里填写 Environment，必须是 `npm-publish`；留空则不按 environment 限制。
 
-`verify` job 只有读权限，用 Bun 做 `bun install --frozen-lockfile`、typecheck 和 test，不申请 OIDC。`publish` job 使用 `actions/setup-node@v6`，`node-version` 为 24，再执行 `npm install -g npm@latest`。它不安装项目依赖，也不使用 Bun。Actions 仍沿用主版本标签（`actions/checkout@v6`、`actions/setup-node@v6`、`oven-sh/setup-bun@v2`），没有把 action 钉死到 commit SHA。后续可以把这些 action 固定到 SHA，作为加固。
+`verify` job 只有读权限，用 Bun 做 `bun install --frozen-lockfile`、typecheck、test 以及 `openchamber-mux` 的构建与 guest 校验（发布 `openchamber-mux` 时上传编译产物），不申请 OIDC。`publish` job 使用 `actions/setup-node@v6`，`node-version` 为 24，再执行 `npm install -g npm@latest`。它不安装项目依赖，也不使用 Bun。Actions 仍沿用主版本标签（`actions/checkout@v6`、`actions/setup-node@v6`、`oven-sh/setup-bun@v2`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`），没有把 action 钉死到 commit SHA。后续可以把这些 action 固定到 SHA，作为加固。
 
 ## 新包第一次发布
 
@@ -38,6 +38,10 @@
 - `@misakacloud/opencode-skill-filter`
 - `@misakacloud/opencode-auto-retry`
 - `@misakacloud/opencode-model-prompts`
+- `@misakacloud/opencode-compact-enhance`
+- `@misakacloud/opencode-mux-core`
+- `@misakacloud/opencode-mux`
+- `@misakacloud/openchamber-mux`
 
 ## 历史迁移
 

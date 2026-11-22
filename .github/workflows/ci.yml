@@ -33,3 +33,9 @@ jobs:
 
       - name: Test
         run: bun run test
+
+      - name: Build openchamber-mux
+        run: bun run --filter ./packages/openchamber-mux build
+
+      - name: Check openchamber-mux guest
+        run: bun run --filter ./packages/openchamber-mux check:guest

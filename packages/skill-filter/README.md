@@ -90,6 +90,29 @@ ctx.skill.transform((skills) => {
 }
 ```
 
+### 本地路径安装
+
+OpenCode V2 的目录型插件加载会查找目录根部的 `index.ts`，此文件转发到 `src/index.ts`，不依赖 `package.json` 的 `main`。将下列绝对路径换成实际包目录，二选一配置，不要同时加载发布包与本地包：
+
+```jsonc
+{
+  "plugins": ["/data/SourceCode/opencode-plugins/packages/skill-filter"]
+}
+```
+
+需要内联配置时，可用 `{ package, options }`：
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "/data/SourceCode/opencode-plugins/packages/skill-filter",
+      "options": { "exposeTool": false, "syncPolicy": false }
+    }
+  ]
+}
+```
+
 ## 配置
 
 支持多层来源，**后层按字段覆盖前层**（数组整体替换，不做并集）：
@@ -103,9 +126,11 @@ ctx.skill.transform((skills) => {
    - `<项目>/skill-filter.json`
 4. **内联 options** —— 直接写在 `opencode.jsonc` 的插件声明处（最高优先级）
 
+项目级配置文件、显式 `configPath` 指向的文件也支持**顶层** `overrides`：命中项目目录时在该文件的规则上叠加；`overrides` 内不能再嵌套 `overrides`。
+
 同一目录里 **jsonc 存在即优先**，不会和同目录的 json 做字段合并。jsonc 损坏时只发出 warning，**不回退同目录 json**；其它目录仍按原规则继续（全局失败不挡住项目；项目里更高目录失败才继续更低目录）。因此 `.opencode/skill-filter.json` 高于项目根的 `skill-filter.jsonc`。
 
-所有候选以及显式 `configPath`（不论扩展名是 `.json` 还是 `.jsonc`）都按 **JSONC** 解析：允许 `//` 与 `/* */` 注释、尾逗号，以及文件开头的 BOM。字符串里的注释样文本原样保留。显式 `configPath` 仍只读该路径，跳过默认搜索。
+所有候选以及显式 `configPath`（不论扩展名是 `.json` 还是 `.jsonc`）都按 **JSONC** 解析：允许 `//` 与 `/* */` 注释、尾逗号，以及文件开头的 BOM。字符串里的注释样文本原样保留。`configPath` **仅在内联 options 中用于选择文件**；写进配置文件的同名字段不能改变本次加载来源。显式 `configPath` 仍只读该路径，跳过默认搜索；`configPath` 与 `syncPolicyPath` 支持 `~/` 展开。
 
 当前目录取自 `ctx.location.directory`，缺失时回退 `process.cwd()`。
 
@@ -147,9 +172,9 @@ ctx.skill.transform((skills) => {
 | `restoreUnhidden` | `boolean` | **已废弃**，保留仅为兼容旧配置，无实际作用 |
 | `debug` | `boolean` | 默认 `true`，通过 `console.debug` 输出命中的规则与修改记录 |
 | `exposeTool` | `boolean` | 默认 `true`，是否注册 `skills_list` 工具 |
-| `configPath` | `string \| false` | 显式指定配置文件路径（`.json` / `.jsonc` 都按 JSONC 解析）；`false` 表示完全跳过文件加载，仅用内联 options |
+| `configPath` | `string \| false` | **仅内联 options 有效**；显式指定配置文件路径（`.json` / `.jsonc` 都按 JSONC 解析，支持 `~/`）；`false` 表示完全跳过文件加载，仅用内联 options |
 | `syncPolicy` | `boolean` | 默认 `true`，是否把 `remove` 规则同步为内核 deny policy（写入 `experimental.policies`），供下一次启动的内核直接剔除 |
-| `syncPolicyPath` | `string` | 显式指定 policy 写入的目标配置；缺省时按序查找全局 `~/.config/opencode/opencode.jsonc` → `opencode.json`。两者都不存在则跳过（不主动创建主配置） |
+| `syncPolicyPath` | `string` | 显式指定 policy 写入的目标配置（支持 `~/`；文件不存在时自动创建）；缺省时按序查找全局 `~/.config/opencode/opencode.jsonc` → `opencode.json`。两者都不存在则跳过（不主动创建主配置） |
 
 > **`syncPolicy` 默认开启。** 仅当存在 `remove` 规则时才会写入；写入是**外科手术式**的，只改动 `experimental.policies`，文件其余部分（包括全部注释）逐字节保留。想完全禁用写文件请设为 `false`。
 
@@ -316,6 +341,12 @@ opencode 启动
 	]
 }
 ```
+
+## 卸载与禁用
+
+- 想暂停同步新的内核 Policy，设置 `"syncPolicy": false`；只隐藏查询工具，设置 `"exposeTool": false`。两者可分别设置，**都不等于卸载，也不会清除已经写入的 Policy**。不要再应用任何过滤规则时，还需移除配置中的 `remove`、`hide`、`enable` 等规则，或直接从 `plugins` 数组删除本插件条目并重启。
+- **卸载后必须检查残留规则：**插件之前自动写入的全局 `~/.config/opencode/opencode.jsonc`（若用 `.json` 或显式 `syncPolicyPath`，则为实际写入的文件）的 `experimental.policies` **不会自动清除**；内核仍会应用这些 deny 规则。手动检查并删除本插件对应的条目：`action` 为 `"integration.use"`、`effect` 为 `"deny"`、`resource` 以 `"skill:"` 开头（例如 `"skill:paseo*"`）。这一识别条件也是同步代码判定“受管项”的条件；如有自己手写且符合条件的 deny，请先核对哪些是需要保留的规则，勿一概删除。`policies` 中其余条目不要改动。
+- 本插件自身的全局 `~/.config/opencode/skill-filter.jsonc` / `.json` 和项目 `.opencode/skill-filter.jsonc` / `.json`、项目根 `skill-filter.jsonc` / `.json` 不会因卸载被自动删除；不再使用可按需手动删除。禁用 `syncPolicy` 不会逆向恢复已经被 policy 剔除的 skill。
 
 ## 开发
 

@@ -16,6 +16,29 @@ OpenCode V2 插件：当模型因内容拦截（`provider.content-filter`，常�
 }
 ```
 
+### 本地路径安装
+
+OpenCode V2 加载目录型插件时读取包目录下的 `index.ts`（此入口转发到 `src/index.ts`），不按 `package.json` 的 `main` 查找。将以下绝对路径换成你本机的包目录；本插件**不读取内联 options**，因此不要添加无效的 `options`：
+
+```jsonc
+{
+  "plugins": ["/data/SourceCode/opencode-plugins/packages/auto-retry"]
+}
+```
+
+目录型插件也支持 `{ package, options }` 形式；对本插件 `options` 只能留空，规则仍写在独立配置文件：
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "/data/SourceCode/opencode-plugins/packages/auto-retry",
+      "options": {}
+    }
+  ]
+}
+```
+
 ## 配置
 
 独立配置文件，不写进 `opencode.json`。`.jsonc` 和 `.json` 都按 JSONC 读取：允许注释、尾逗号和文件开头的 BOM，字符串里的 `//`、`/*` 会原样保留。
@@ -58,7 +81,11 @@ OpenCode V2 插件：当模型因内容拦截（`provider.content-filter`，常�
 }
 ```
 
-缺 `models` 或 `errors` 的规则会被丢掉，并打一条 `[auto-retry]` 警告，不会因此匹配所有模型。`prompt` 默认“继续”，`maxRetries` 默认 3，`delayMs` 默认 2000，可以是 0。`resetAfterToolCalls` 默认 10，`resetAfterMs` 默认 120000，都必须是正整数；写成 0、负数或小数会回退默认值并警告。
+缺 `models` 或 `errors` 的规则会被丢掉，并打一条 `[auto-retry]` 警告，不会因此匹配所有模型。`prompt` 默认“继续”，`maxRetries` 默认 3，`delayMs` 默认 2000；`maxRetries: 0` 表示不发送续写，`delayMs: 0` 表示不额外等待。`maxRetries` 和 `delayMs` 必须是非负整数；非法值、非字符串或空字符串 `prompt` 会**静默回退**当前默认值（不为这三个字段单独警告）。`resetAfterToolCalls` 默认 10，`resetAfterMs` 默认 120000，都必须是正整数；写成 0、负数或小数会回退默认值并警告。
+
+## 卸载与禁用
+
+卸载时从 `opencode.json` / `opencode.jsonc` 的 `plugins` 数组删除本插件的包名或本地路径条目，并重启 OpenCode。临时禁用可在全局或项目 `auto-retry.jsonc`（或 `.json`）中设置 `"enabled": false`，或将 `"rules": []` 设为空；重新启用时恢复规则。本插件不写持久缓存、不改写 OpenCode 主配置；如果不再使用，也可手动删除 `~/.config/opencode/auto-retry.jsonc` / `.json` 和项目 `.opencode/auto-retry.jsonc` / `.json`，**不清理配置文件也不会重新触发已卸载插件**。
 
 ## 行为
 

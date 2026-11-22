@@ -10,7 +10,9 @@
   },
   "files": [
     "src",
-    "index.ts"
+    "index.ts",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -32,7 +34,7 @@
     "url": "git+https://github.com/chisaato/opencode-plugins.git",
     "directory": "packages/auto-model-config"
   },
-  "author": "",
+  "author": "chisaato",
   "license": "MIT",
   "dependencies": {
     "@opencode/plugin": "2.0.16"
