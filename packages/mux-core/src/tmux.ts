@@ -18,7 +18,8 @@ const cleanupHookName = "pane-died[100]"
 // pane-died 提供目标 pane 上下文；kill-pane 的 -t 不展开格式，直接继承该目标。
 const cleanupHook = 'if-shell -F "#{pane_dead}" "kill-pane"'
 const byobuTable = "mux-byobu"
-const themeHook = "after-new-window[mux-theme]"
+// 使用数字下标，兼容 tmux 3.4 等不支持具名 hook 下标的版本。
+const themeHook = "after-new-window[100]"
 const mouseKey = /^(?:[CMS]-)*(?:Mouse|Wheel|DoubleClick|TripleClick)\S*$/
 const keyBinding = /^(bind-key\s+(?:-r\s+)?-T\s+)(\S+)(\s+(\S+)\s+\S.*)$/
 

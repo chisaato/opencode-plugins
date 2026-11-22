@@ -279,7 +279,7 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
     await Promise.all(Object.entries(sessionOptions).map(async ([key, value]) => {
       expect((await tmux("show-options", "-v", "-t", session, key)).stdout).toBe(`${value}\n`)
     }))
-    expect((await tmux("show-hooks", "-t", session, "after-new-window")).stdout).toMatch(/after-new-window\[mux-theme\].*window-status-current-format/)
+    expect((await tmux("show-hooks", "-t", session, "after-new-window")).stdout).toMatch(/after-new-window\[100\].*window-status-current-format/)
     expect((await tmux("show-hooks", "-p", "-t", task.paneId, "pane-died")).stdout).toContain("pane-died[100]")
 
     const f2 = await tmux("list-keys", "-T", "mux-byobu", "F2")
@@ -312,12 +312,12 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
       const hooks = await tmux("show-hooks", "-t", muxSession, "after-new-window")
       if (statusTheme === "off") {
         expect(right.stdout).toBe("")
-        expect(hooks.stdout).not.toContain("mux-theme")
+        expect(hooks.stdout).not.toContain("after-new-window[100]")
         expect((await tmux("show-options", "-wv", "-t", task.paneId, "window-status-current-format")).stdout).toBe("")
         expect((await tmux("show-options", "-v", "-t", muxSession, "mouse")).stdout).toBe("")
       } else {
         expect(right.stdout).toBe("#S + %Y-%m-%d + %H:%M:%S\n")
-        expect(hooks.stdout).toContain("after-new-window[mux-theme]")
+        expect(hooks.stdout).toContain("after-new-window[100]")
         const manual = await tmux("new-window", "-d", "-t", `${muxSession}:`, "-P", "-F", "#{pane_id}", "sleep 30")
         expect(manual.exitCode).toBe(0)
         for (const pane of [task.paneId, manual.stdout.trim()]) {
