@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "bun"]
+  },
+  "include": ["service/**/*", "panel/**/*.ts", "status/**/*.ts", "src/**/*", "scripts/**/*", "test/**/*"],
+  "exclude": ["node_modules", "panel/main.js", "status/main.js", "service/main.js", "opencode-plugin/**/*"]
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@misakacloud/openchamber-mux",
+  "version": "0.1.0",
+  "description": "OpenChamber extension for managing OpenCode tmux/psmux builds and background services",
+  "type": "module",
+  "files": [
+    "panel/index.html",
+    "panel/main.js",
+    "status/index.html",
+    "status/main.js",
+    "service/main.js",
+    "opencode-plugin/index.js",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check:guest": "bunx openchamber-guest-check ."
+  },
+  "keywords": [
+    "openchamber",
+    "openchamber-extension",
+    "opencode",
+    "tmux",
+    "psmux"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chisaato/opencode-plugins.git",
+    "directory": "packages/openchamber-mux"
+  },
+  "author": "chisaato",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "devDependencies": {
+    "@misakacloud/opencode-mux-core": "^0.1.0",
+    "@openchamber/sdk": "^2.7.3",
+    "@types/bun": "latest",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=1.22.0"
+    },
+    "id": "opencode-mux",
+    "name": "Mux Tasks",
+    "icon": "terminal-box",
+    "contributes": {
+      "panel": {
+        "entry": "panel/index.html"
+      },
+      "statusSection": {
+        "entry": "status/index.html",
+        "title": "Mux Tasks",
+        "height": 220,
+        "defaultExpanded": true,
+        "requiresProject": true
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "exec": ["tmux", "psmux", "sh", "cmd.exe"]
+        }
+      },
+      "opencodePlugin": "opencode-plugin",
+      "attach": false
+    }
+  }
+}
