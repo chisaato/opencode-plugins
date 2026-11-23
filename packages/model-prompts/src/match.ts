@@ -30,17 +30,25 @@ export function matchesRule(rule: Rule, input: MatchInput): boolean {
   return true
 }
 
-export async function resolvePromptPath(entry: string, rule: Rule, globalPromptsDir: string): Promise<string> {
+async function missing(file: string): Promise<boolean> {
+  try {
+    await fs.stat(file)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+  }
+}
+
+export async function resolvePromptPath(
+  entry: string,
+  rule: Rule,
+  globalPromptsDir: string,
+  isMissing = missing,
+): Promise<string> {
   if (entry.startsWith("~/") || path.isAbsolute(entry)) return resolveUserPath(entry)
   if (entry.startsWith("./") || entry.startsWith("../")) return path.resolve(rule.configDir, entry)
   const local = path.resolve(rule.promptsDir, entry)
-  if (rule.promptsDir !== globalPromptsDir) {
-    try {
-      await fs.stat(local)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return path.resolve(globalPromptsDir, entry)
-    }
-  }
+  if (rule.promptsDir !== globalPromptsDir && await isMissing(local)) return path.resolve(globalPromptsDir, entry)
   return local
 }
 

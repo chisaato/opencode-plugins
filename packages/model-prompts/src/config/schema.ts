@@ -27,19 +27,19 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 function strings(value: unknown, label: string, logger: Logger, paths = false): string[] | undefined {
   if (value === undefined) return undefined
   if (!Array.isArray(value)) {
-    logger.warn(`${label}: expected an array`)
+    logger.warn(`${label}：应为数组`)
     return []
   }
   return value.filter((entry): entry is string => {
     if (typeof entry === "string" && entry.length > 0 && (!paths || !/[\r\n]/.test(entry))) return true
-    logger.warn(`${label}: invalid ${paths ? "prompt path" : "pattern"} ${JSON.stringify(entry)}`)
+    logger.warn(`${label}：无效的${paths ? "提示词路径" : "匹配模式"} ${JSON.stringify(entry)}`)
     return false
   })
 }
 
 export function normalizeLayer(raw: unknown, configDir: string, source: string, logger: Logger): Layer | undefined {
   if (!isObject(raw)) {
-    logger.warn(`${source}: expected a JSON object`)
+    logger.warn(`${source}：应为 JSON 对象`)
     return undefined
   }
   const promptsDir =
@@ -67,20 +67,20 @@ export function normalizeLayer(raw: unknown, configDir: string, source: string, 
       promptsDir,
     })
   }
-  if (raw.models !== undefined && !isObject(raw.models)) logger.warn(`${source}.models: expected an object`)
+  if (raw.models !== undefined && !isObject(raw.models)) logger.warn(`${source}.models：应为对象`)
   if (isObject(raw.models)) {
     for (const [pattern, item] of Object.entries(raw.models)) {
       if (Array.isArray(item)) add({ prompts: item }, [pattern], `${source}.models.${pattern}`)
       else if (isObject(item)) add(item, [pattern], `${source}.models.${pattern}`)
-      else logger.warn(`${source}.models.${pattern}: invalid rule`)
+      else logger.warn(`${source}.models.${pattern}：无效的规则`)
     }
   }
-  if (raw.rules !== undefined && !Array.isArray(raw.rules)) logger.warn(`${source}.rules: expected an array`)
+  if (raw.rules !== undefined && !Array.isArray(raw.rules)) logger.warn(`${source}.rules：应为数组`)
   if (Array.isArray(raw.rules)) {
     raw.rules.forEach((item: unknown, index) => {
       if (isObject(item)) {
         add(item, strings(item.models, `${source}.rules[${index}].models`, logger) ?? [], `${source}.rules[${index}]`)
-      } else logger.warn(`${source}.rules[${index}]: invalid rule`)
+      } else logger.warn(`${source}.rules[${index}]：无效的规则`)
     })
   }
   return { rules, replace: raw.replace === true, debug: raw.debug === true, source }

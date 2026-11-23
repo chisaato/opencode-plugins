@@ -27,28 +27,31 @@ export interface ResolvedConfig {
 }
 
 /** 同目录 jsonc 一旦存在，解析失败也不降级到 json。 */
-async function readGroup(candidates: string[], logger: Logger): Promise<{ status: "missing" | "rejected" | "loaded"; layer?: Layer }> {
+async function readGroup(candidates: string[], logger: Logger, readText: (file: string) => Promise<string>): Promise<{ status: "missing" | "rejected" | "loaded"; layer?: Layer }> {
   for (const candidate of candidates) {
     let text: string
     try {
-      text = await fs.readFile(candidate, "utf8")
+      text = await readText(candidate)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
-      logger.warn(`Failed to read config at ${candidate}: ${String(error)}`)
+      logger.warn(`无法读取配置 ${candidate}：${String(error)}`)
       return { status: "rejected" }
     }
     try {
       const layer = normalizeLayer(parseJsonc(text), path.dirname(candidate), candidate, logger)
       return layer ? { status: "loaded", layer } : { status: "rejected" }
     } catch (error) {
-      logger.warn(`Failed to parse config at ${candidate}: ${String(error)}`)
+      logger.warn(`无法解析配置 ${candidate}：${String(error)}`)
       return { status: "rejected" }
     }
   }
   return { status: "missing" }
 }
 
-export async function loadConfig(options: LoadConfigOptions = {}): Promise<ResolvedConfig> {
+export async function loadConfig(
+  options: LoadConfigOptions = {},
+  readText: (file: string) => Promise<string> = (file) => fs.readFile(file, "utf8"),
+): Promise<ResolvedConfig> {
   const logger = options.logger ?? createLogger(false)
   const projectDirectory = options.projectDirectory ?? process.cwd()
   const globalPromptsDir = path.join(getGlobalConfigDir(options), PROMPTS_DIR_NAME)
@@ -61,16 +64,16 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Resol
         ? resolveUserPath(explicit)
         : path.resolve(projectDirectory, explicit)
       candidates.push(target)
-      const loaded = await readGroup([target], logger)
+      const loaded = await readGroup([target], logger, readText)
       if (loaded.layer) layers.push(loaded.layer)
     } else {
       const global = getDefaultConfigPaths(options)
       candidates.push(...global)
-      const loaded = await readGroup(global, logger)
+      const loaded = await readGroup(global, logger, readText)
       if (loaded.layer) layers.push(loaded.layer)
       for (const group of getProjectConfigCandidateGroups(projectDirectory)) {
         candidates.push(...group)
-        const project = await readGroup(group, logger)
+        const project = await readGroup(group, logger, readText)
         if (project.layer) layers.push(project.layer)
         if (project.status !== "missing") break
       }
