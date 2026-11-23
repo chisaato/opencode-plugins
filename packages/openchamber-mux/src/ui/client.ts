@@ -1,8 +1,12 @@
 import { HostRequestError, type HostClient, type HostRequestErrorCode } from "@openchamber/sdk"
-import type { TaskRole, TaskStatus } from "@misakacloud/opencode-mux-core"
+import type { HistoryCandidate, TaskRole, TaskStatus } from "@misakacloud/opencode-mux-core"
 import type {
   ErrorResponse,
   HealthResponse,
+  HistoryCleanBody,
+  HistoryCleanResponse,
+  HistoryPreviewBody,
+  HistoryPreviewResponse,
   InputBody,
   LogsResponse,
   PruneBody,
@@ -18,6 +22,8 @@ import type {
   TasksResponse,
 } from "../types"
 
+export const HISTORY_CLEAN_MAX_BODY_BYTES = 48 * 1024
+
 export class ServiceApiError extends Error {
   constructor(
     readonly status: number,
@@ -26,6 +32,16 @@ export class ServiceApiError extends Error {
   ) {
     super(message)
     this.name = "ServiceApiError"
+  }
+}
+
+export class HistoryCleanPartialError extends Error {
+  constructor(
+    readonly cause: unknown,
+    readonly partial: HistoryCleanResponse,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause))
+    this.name = "HistoryCleanPartialError"
   }
 }
 
@@ -59,6 +75,10 @@ const SERVICE_MESSAGE_MAP = new Map([
 ])
 
 export function formatClientError(error: unknown): FormattedError {
+  if (error instanceof HistoryCleanPartialError) {
+    return formatClientError(error.cause)
+  }
+
   if (error instanceof HostRequestError) {
     switch (error.code) {
       case "NO_SERVICE":
@@ -163,6 +183,63 @@ export interface MuxClient {
   getLogs: (id: string, lines?: number) => Promise<LogsResponse>
   sendInput: (id: string, body: InputBody) => Promise<{ ok: boolean }>
   prune: (body?: PruneBody) => Promise<PruneResponse>
+  previewHistory: (body: HistoryPreviewBody) => Promise<HistoryPreviewResponse>
+  cleanHistory: (body: HistoryCleanBody) => Promise<HistoryCleanResponse>
+}
+
+const utf8Encoder = new TextEncoder()
+
+/** 按服务 64 KiB JSON 上限留出安全余量拆分候选批次。 */
+export function splitHistoryCleanBatches(
+  body: HistoryCleanBody,
+  maxBytes = HISTORY_CLEAN_MAX_BODY_BYTES,
+): HistoryCleanBody[] {
+  const base: Omit<HistoryCleanBody, "candidates"> = { cwd: body.cwd }
+  if (body.includeShell !== undefined) base.includeShell = body.includeShell
+  if (body.retentionDays !== undefined) base.retentionDays = body.retentionDays
+
+  if (body.candidates.length === 0) {
+    return [{ ...base, candidates: [] }]
+  }
+
+  const baseBytes = utf8Encoder.encode(JSON.stringify({ ...base, candidates: [] })).length
+  const batches: HistoryCleanBody[] = []
+  let current: HistoryCandidate[] = []
+  let currentBytes = baseBytes
+
+  for (const item of body.candidates) {
+    const candidate: HistoryCandidate = {
+      id: item.id,
+      updatedAt: item.updatedAt,
+      restartCount: item.restartCount,
+    }
+    const itemBytes = utf8Encoder.encode(JSON.stringify(candidate)).length
+    const nextBytes = currentBytes + (current.length === 0 ? 0 : 1) + itemBytes
+    if (current.length > 0 && nextBytes > maxBytes) {
+      batches.push({ ...base, candidates: current })
+      current = [candidate]
+      currentBytes = baseBytes + itemBytes
+    } else {
+      current.push(candidate)
+      currentBytes = nextBytes
+    }
+  }
+  if (current.length > 0) {
+    batches.push({ ...base, candidates: current })
+  }
+  return batches
+}
+
+async function withNotFoundFallback<T>(work: () => Promise<T>, message: string): Promise<T> {
+  try {
+    return await work()
+  } catch (error) {
+    if (error instanceof ServiceApiError && error.status === 404 &&
+      (error.message === "HTTP 404" || error.message === "Not found")) {
+      throw new ServiceApiError(404, message)
+    }
+    throw error
+  }
 }
 
 function parseJsonBody<T>(raw: string, status: number): T {
@@ -226,17 +303,11 @@ export function createMuxClient(host: HostClient): MuxClient {
       requestJson<ServiceActionHttpResponse>("POST", `/tasks/${encodeURIComponent(id)}/stop`, { body }),
     removeTask: (id) =>
       requestJson<ServiceActionHttpResponse>("DELETE", `/tasks/${encodeURIComponent(id)}`),
-    closeSession: async (body) => {
-      try {
-        return await requestJson<SessionCloseResponse>("POST", "/session/close", { body, requireBody: true })
-      } catch (error) {
-        if (error instanceof ServiceApiError && error.status === 404 &&
-          (error.message === "HTTP 404" || error.message === "Not found")) {
-          throw new ServiceApiError(404, "未找到对应会话，或当前本地服务不支持关闭会话")
-        }
-        throw error
-      }
-    },
+    closeSession: (body) =>
+      withNotFoundFallback(
+        () => requestJson<SessionCloseResponse>("POST", "/session/close", { body, requireBody: true }),
+        "未找到对应会话，或当前本地服务不支持关闭会话",
+      ),
     getLogs: (id, lines = 120) =>
       requestJson<LogsResponse>("GET", `/tasks/${encodeURIComponent(id)}/logs`, {
         query: { lines: String(lines) },
@@ -248,6 +319,36 @@ export function createMuxClient(host: HostClient): MuxClient {
       if (body.cwd && body.cwd.trim()) payload.cwd = body.cwd
       if (body.role) payload.role = body.role
       return requestJson<PruneResponse>("POST", "/prune", { body: payload })
+    },
+    previewHistory: (body) => {
+      const payload: HistoryPreviewBody = { cwd: body.cwd }
+      if (body.includeShell !== undefined) payload.includeShell = body.includeShell
+      if (body.retentionDays !== undefined) payload.retentionDays = body.retentionDays
+      return withNotFoundFallback(
+        () => requestJson<HistoryPreviewResponse>("POST", "/history/preview", { body: payload, requireBody: true }),
+        "当前本地服务不支持清理历史，请重启服务后重试",
+      )
+    },
+    cleanHistory: async (body) => {
+      const batches = splitHistoryCleanBatches(body)
+      const aggregated: HistoryCleanResponse = { removed: [], skipped: [], failed: [] }
+      for (let index = 0; index < batches.length; index++) {
+        try {
+          const res = await withNotFoundFallback(
+            () => requestJson<HistoryCleanResponse>("POST", "/history/clean", { body: batches[index], requireBody: true }),
+            "当前本地服务不支持清理历史，请重启服务后重试",
+          )
+          aggregated.removed.push(...res.removed)
+          aggregated.skipped.push(...res.skipped)
+          aggregated.failed.push(...res.failed)
+        } catch (error) {
+          if (index > 0) {
+            throw new HistoryCleanPartialError(error, aggregated)
+          }
+          throw error
+        }
+      }
+      return aggregated
     },
   }
 }

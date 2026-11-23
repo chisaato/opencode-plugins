@@ -1,4 +1,4 @@
-import type { MuxBackend, TaskRole, TaskStatus, TriggerSource } from "@misakacloud/opencode-mux-core"
+import type { ManagedTask, MuxBackend, TaskRole, TaskStatus, TriggerSource } from "@misakacloud/opencode-mux-core"
 import type { Tone } from "@openchamber/sdk/ui"
 import type { TaskView } from "../types"
 
@@ -38,7 +38,7 @@ export function backendLabel(backend: MuxBackend | null): string {
 }
 
 /** 按关注度排序：运行中与失败任务优先，再按更新时间倒序。 */
-export function sortTasks(tasks: readonly TaskView[]): TaskView[] {
+export function sortTasks<T extends Pick<ManagedTask, "status" | "updatedAt" | "name">>(tasks: readonly T[]): T[] {
   return [...tasks].sort((a, b) => {
     const priorityDiff = statusMeta(a.status).priority - statusMeta(b.status).priority
     if (priorityDiff !== 0) return priorityDiff

@@ -1,4 +1,13 @@
-import type { ManagedTask, MuxBackend, ServiceAction, TaskRole, TaskStatus } from "@misakacloud/opencode-mux-core"
+import type {
+  CleanHistoryOptions,
+  CleanHistoryResult,
+  HistoryOptions,
+  ManagedTask,
+  MuxBackend,
+  ServiceAction,
+  TaskRole,
+  TaskStatus,
+} from "@misakacloud/opencode-mux-core"
 
 export interface TaskView extends ManagedTask {
   attachCommand: string
@@ -76,6 +85,16 @@ export interface PruneBody {
 export interface PruneResponse {
   pruned: ManagedTask[]
 }
+
+export interface HistoryPreviewBody extends HistoryOptions {}
+
+export interface HistoryPreviewResponse {
+  tasks: ManagedTask[]
+}
+
+export interface HistoryCleanBody extends CleanHistoryOptions {}
+
+export interface HistoryCleanResponse extends CleanHistoryResult {}
 
 export interface SessionCloseBody {
   cwd: string

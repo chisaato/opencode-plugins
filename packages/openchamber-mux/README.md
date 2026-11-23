@@ -17,13 +17,13 @@ Mux 把构建、测试和后台服务放进独立的 `tmux`（Linux/macOS）或 
 
 | 层 | 入口 | 作用 |
 | --- | --- | --- |
-| OpenCode 插件 | 扩展自带的 `opencode-plugin/index.js`，或独立包 `@misakacloud/opencode-mux` | 注册七个 `mux_*` 工具；全局配置只保留**一个插件来源/一条加载路径**，避免重复注册 ID `opencode-mux`。 |
+| OpenCode 插件 | 扩展自带的 `opencode-plugin/index.js`，或独立包 `@misakacloud/opencode-mux` | 注册 `mux_*` 工具；全局配置只保留**一个插件来源/一条加载路径**，避免重复注册 ID `opencode-mux`。 |
 | OpenChamber 扩展 | `panel/index.html`、`status/index.html`、`service/main.js` | 增加 Mux Tasks 面板、项目状态区和本地 HTTP 服务；面板创建/筛选/查看任务，复制附加命令，查看日志与发送输入。 |
 | 共享状态 | 默认 `~/.local/state/opencode-mux/` | `tasks/<任务 ID>.json` 保存任务记录；`exit/` 保存命令退出码哨兵。插件与扩展服务通过状态记录及同一复用器会话协作，不是两套独立任务。 |
 
 OpenChamber 服务只监听服务端 `127.0.0.1`，使用宿主注入的 Bearer token 鉴权，以服务端用户身份运行；`service` 权限列出的可执行文件是权限声明，不是操作系统沙箱。`opencodePlugin` 权限允许扩展贡献 OpenCode 插件。扩展要求 OpenChamber `>=1.22.0`。远程 OpenCode 无法直接加载只存在于 OpenChamber 主机的本地路径；应分别安装可访问的插件，并保证双方实际共享主机/用户、socket 和状态目录。
 
-状态目录优先级：插件显式 `options.stateDir`（只影响插件）→ `OPENCODE_MUX_STATE_DIR` → `$XDG_STATE_HOME/opencode-mux` → `~/.local/state/opencode-mux`。服务使用核心库的环境变量/默认值，不读取插件 `options`。仅在终端设置环境变量不会自动传到 OpenChamber 服务（宿主可能过滤子进程环境）；不需要自定义时，两端同用户使用默认目录最简单。自定义 `socketName` 也要确保双方连接的是同一个 socket；扩展服务默认使用默认 socket。
+状态目录优先级：插件显式 `options.stateDir`（只影响插件）→ `OPENCODE_MUX_STATE_DIR` → `$XDG_STATE_HOME/opencode-mux` → `~/.local/state/opencode-mux`。服务不读取插件 `options`，宿主也会过滤扩展服务的环境变量；不需要自定义时，两端同用户使用默认目录最简单。要让两边使用同一个专用 tmux socket，使用下面的[用户级 tmux 配置](#用户级-tmux-配置)。
 
 ## 安装
 
@@ -65,7 +65,7 @@ OpenChamber 服务只监听服务端 `127.0.0.1`，使用宿主注入的 Bearer 
 }
 ```
 
-也可配置内联 `options`，见[插件配置参考](#插件配置参考)。此路径提供七个工具，但不会凭空提供 OpenChamber 面板。若后来安装扩展，先清理重复加载项。
+也可配置内联 `options`，见[插件配置参考](#插件配置参考)。此路径仅提供工具，不提供 OpenChamber 面板。若后来安装扩展，先清理重复加载项。
 
 ## 快速上手
 
@@ -114,12 +114,13 @@ OpenChamber 服务只监听服务端 `127.0.0.1`，使用宿主注入的 Bearer 
 | --- | --- |
 | 面板任务卡片/详情“移除” | 第一次点击显示就地确认，第二次点“确认移除”；运行中明确显示“终止并移除”。销毁该任务的 pane 并删除记录，pane 已不在也可移除记录；可取消或按 Esc。 |
 | 面板非空会话组“关闭会话” | 弹框显示会话名、目录、任务数及运行中任务数；需点击“确认关闭会话”。终止该会话**全部**任务（包括后台服务）、删除任务记录，已 attach 的终端会被脱离；这不是 F6。 |
+| 面板“清理历史” | 预览当前项目失效记录和超过 7 天的已结束任务，再一次确认。默认保留驻留 shell；只有确认不再需要里面的交互现场时才勾选。不会终止运行中的任务，也不会删除手工开的非受管 pane。 |
 | `mux_remove({"id":"<任务 ID>"})` | 仅移除单任务；也可用 `name`、`role`、`cwd` 定位。 |
 | `mux_remove({"session":true,"cwd":"."})` | 按 `cwd` 关闭整个项目的 mux 会话；忽略 `id/name/role`，省略 `cwd` 时使用当前项目。**工具调用本身不提供面板的二次确认**。 |
 
 ## OpenCode 工具参考
 
-以下示例是发给 AI 的 JSON **工具入参**；`id` 从 `mux_list` 获取。涉及 `cwd` 时相对路径以当前项目目录为基准；无 `cwd` 的任务查询默认搜索**所有目录**，同名任务必须补充 `role/cwd` 或改用 `id`。整数参数必须是 `0` 至 `2147483647`；`tailLines:0` 不抓取尾部日志。七个工具由 OpenCode 插件提供，OpenChamber 面板不要求手动调用它们。
+以下示例是发给 AI 的 JSON **工具入参**；`id` 从 `mux_list` 获取。涉及 `cwd` 时相对路径以当前项目目录为基准；无 `cwd` 的单任务名称查询默认搜索**所有目录**，同名任务必须补充 `role/cwd` 或改用 `id`。整数参数必须是 `0` 至 `2147483647`；`tailLines:0` 不抓取尾部日志。工具由 OpenCode 插件提供，OpenChamber 面板不要求手动调用它们。
 
 | 工具 | 参数与默认值 | 示例及结果 |
 | --- | --- | --- |
@@ -129,6 +130,7 @@ OpenChamber 服务只监听服务端 `127.0.0.1`，使用宿主注入的 Bearer 
 | `mux_logs` | 必须指定 `id` 或 `name`；可选 `role`、`cwd`、`lines:integer`（100）。 | `{"id":"<任务 ID>","lines":200}`；读取 pane 最近日志。 |
 | `mux_input` | 必填 `input:string`（可为空，仅发回车），并指定 `id` 或 `name`；可选 `role`、`cwd`、`enter:boolean`（`true`）。 | `{"id":"<任务 ID>","input":"git status","enter":false}`；向仍活着的 pane 发送字面文本，含退出后驻留的 shell；`false` 不发送回车。 |
 | `mux_remove` | 单任务必须指定 `id` 或 `name`（可选 `role`、`cwd`）；可选 `session:boolean`（`false`）。`session:true` 时仅 `cwd` 定位会话（默认当前项目）。 | `{"id":"<任务 ID>"}` 移除单任务；`{"session":true,"cwd":"."}` 关闭整个会话并清理其记录。 |
+| `mux_clean_history` | 可选 `cwd`（当前项目）、`retentionDays`（7）、`includeShell`（`false`）；确认时传入预览给出的 `candidates`。 | `{}` 预览。确认时保留相同的筛选参数；预览后重启或状态变化的任务会跳过。 |
 | `mux_list` | 可选 `cwd`（当前项目）、`all:boolean`（`false`，仅在未指定 `cwd` 时查看所有项目）、`role:"build" \| "service"`、`status:"running" \| "succeeded" \| "failed" \| "stopped" \| "gone"`、`pruneGone:boolean`（`false`）。 | `{"all":true,"pruneGone":true}`；先按目录/角色范围清理已失去 pane 的记录，再按状态筛选显示；清理范围**不受** `status` 限制。 |
 
 `defaultTimeoutMs` 与 `defaultTailLines` 是 OpenCode 插件的工具默认值覆盖项：分别覆盖构建等待/服务停止的原默认时限（120 秒/2 秒）和构建/服务/重启的原默认尾部行数（80/30/30）。单次工具参数优先。`mux_logs.lines` 的默认 100 行不受 `defaultTailLines` 影响。
@@ -166,9 +168,24 @@ OpenChamber 服务只监听服务端 `127.0.0.1`，使用宿主注入的 Bearer 
 | `defaultTimeoutMs` | 非负整数；未设置时构建等待 120000 ms，服务停止 2000 ms | 覆盖两种操作的默认超时；超时不自动杀死构建，停止服务可用 `force:true` 强停。 |
 | `defaultTailLines` | 非负整数；未设置时构建 80 行、服务/重启 30 行 | 覆盖这些工具的默认尾部行数；`0` 禁用抓取。 |
 | `keepShellOnExit` | 布尔值，默认 `true` | POSIX tmux 中命令退出后保留交互式 shell 并用哨兵记录原命令退出码；设 `false` 不驻留 shell，也不启用该哨兵机制，按原有 pane 退出行为处理。Windows/psmux 沿用原行为。 |
-| `byobuKeys` | 布尔值，默认 `true` | 对 mux 创建的 tmux 会话启用上表键位；设 `false` 不设置这些自定义键位，使用 tmux 自身键位。Windows/psmux 沿用原行为。 |
+| `byobuKeys` | 布尔值；普通模式默认 `true`，自定义 tmux 配置默认 `false` | 对 mux 创建的 tmux 会话启用上表键位；设 `false` 不设置这些自定义键位，使用 tmux 自身键位。Windows/psmux 沿用原行为。 |
+| `statusTheme` | `"powerline" \| "ascii" \| "off"`；自定义 tmux 配置默认 `off` | 指定 Mux 状态栏样式；`off` 保留 tmux 自身样式。 |
 
 未知字段或无效选项值被忽略；数值选项必须是安全的非负整数且不超过 `2147483647`。扩展本地服务单独创建核心管理器，不继承这些插件选项。
+
+### 用户级 tmux 配置
+
+在 **OpenChamber 服务端**，在运行 OpenChamber 的系统用户主目录下创建 `~/.config/opencode/opencode-mux.json`：
+
+```json
+{
+  "socketName": "opencode-themed"
+}
+```
+
+默认读取同目录的 `tmux.conf`。可选的 `tmuxConfig` 相对 `~/.config/opencode/` 解析，绝对路径直接使用。该文件必须可读，`socketName` 必须是专用的非默认名称。只用信任的配置：tmux 文件可以执行命令。没有 `opencode-mux.json` 就不会启用这项配置。配置入口固定在系统用户主目录，不受项目目录、`HOME` 或 `XDG_CONFIG_HOME` 影响，也不运行 Byobu 启动器。OpenCode 与扩展服务在同一主机、同一用户、同一状态目录下共用这份设置；项目 `options.socketName` 不会覆盖其中的 socket。
+
+启用后重新启动 OpenCode 和扩展服务以读取设置。旧 socket 的任务不会迁移或关闭。tmux 只在指定 socket 的服务启动时加载配置，Mux 不会重载现有服务。自定义配置默认保留其状态栏和按键；要保留 F6 脱离，添加 `bind-key -n F6 detach-client`。
 
 ## HTTP API
 
@@ -182,6 +199,8 @@ OpenChamber 服务只监听服务端 `127.0.0.1`，使用宿主注入的 Bearer 
 | `GET /tasks` | 查询 `cwd?`、`role?=build\|service`、`status?=running\|succeeded\|failed\|stopped\|gone` | `{"tasks":[TaskView,...],"backend":{...}\|null}`；无后端时任务列表为空。 |
 | `POST /builds` | `{"name":"检查","command":"bun run typecheck","cwd":"/path/to/project","wait":false,"timeoutMs":15000,"tailLines":80}`；后三项可选，`wait` 默认 `false`；等待时 `timeoutMs` 最多 15000 ms（省略亦为 15000）。 | `{"ok":true,"task":TaskView,"tail":"...","timedOut":false}`；`wait:false` 的 `ok` 仅表示启动成功。 |
 | `POST /services` | `{"action":"start","name":"开发服务","cwd":"/path/to/project","command":"npm run dev"}`；`action` 可为 `start/restart/stop/status/remove`；`command?`（新服务必填）、`restartIfRunning?`、`force?`、`timeoutMs?`。 | `{"ok":true,"task":TaskView,"timedOut":false}`；找不到时 `task` 可缺省、`ok:false`。 |
+| `POST /history/preview` | `{"cwd":"/path/to/project","includeShell":false,"retentionDays":7}`；后两项可选。 | `{"tasks":[ManagedTask,...]}`；不移除任务。 |
+| `POST /history/clean` | 沿用预览参数，增加 `candidates` 数组，逐项传回预览记录的 `id`、`updatedAt` 和 `restartCount`。 | `{"removed":["id"],"skipped":["id"],"failed":[{"id":"...","message":"..."}]}`。 |
 | `POST /prune` | `{"cwd":"/path/to/project","role":"build"}`；两项均可选，`role` 为 `build/service`。 | `{"pruned":[ManagedTask,...]}`；清理范围内已失去 pane 的记录。 |
 | `DELETE /tasks/:id` | 无 | `{"ok":true,"task":TaskView}`；删除指定任务 pane 和记录。 |
 | `POST /tasks/:id/restart` | `{"command":"新的命令"}`；`command?`，省略沿用旧命令。 | `{"ok":true,"task":TaskView}`，可带 `timedOut`。 |
@@ -209,5 +228,5 @@ curl -fsS -H "Authorization: Bearer $OPENCHAMBER_SERVICE_TOKEN" \
 | CLI 有任务、面板没有，或 attach 找不到会话 | 核对两端的主机、用户、状态目录、后端和 socket；`options.stateDir/socketName` 只作用于 OpenCode 插件，不会自动同步至扩展服务。非默认 socket 用返回的 `attachCommand`。 |
 | 构建工具超时是否终止任务？ | 不会；继续用 `mux_list` / `mux_logs` 或复制 `attachCommand` 检查。HTTP 构建如果 `wait:true` 最多等待 15 秒；OpenCode 工具默认最多等 120 秒。 |
 | 为什么命令结束后 pane 还活着、状态却已经是完成/失败？ | POSIX tmux 默认驻留 shell；`shell:true` 标识该状态，`exit/` 哨兵记录**原命令**退出码，避免把驻留 shell 误认作原任务仍在运行。要保留现场按 F6；退出 shell 用 Ctrl+D/`exit`。禁用 `keepShellOnExit` 可关闭驻留和这套哨兵。 |
-| pane 已死或被外部关闭，记录还在？ | 协调检查会将找不到的 pane 标为 `gone`（显式强停可保留 `stopped`）；用 `mux_list({"pruneGone":true})` 或面板“清理失效”清除记录。不要手工编辑 `tasks/` 与 `exit/`：重启、删除、清理会处理对应哨兵，哨兵按任务 ID、pane 和 PID 区分运行代次。 |
+| pane 已死或被外部关闭，记录还在？ | 协调检查会将找不到的 pane 标为 `gone`（显式强停可保留 `stopped`）；用 `mux_list({"pruneGone":true})` 或面板“清理历史”清除失效记录。不要手工编辑 `tasks/` 与 `exit/`：重启、删除、清理会处理对应哨兵，哨兵按任务 ID、pane 和 PID 区分运行代次。 |
 | 退出码与状态如何映射？ | 取得原命令退出码时：`0 → succeeded`，`≥128 → stopped`，其他非零值 `→ failed`。无哨兵时根据 pane 存活、pane 退出码与停止请求判断；无 pane 为 `gone`，不能把所有非零退出都当作失败。 |

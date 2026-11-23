@@ -73,6 +73,30 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
     expect(await manager.captureLogs(first.task.id)).toContain("failure-fast")
   })
 
+  it("cleans only confirmed history while preserving running, manual, and default shell panes", async () => {
+    const cwd = join(dir, "history-project")
+    await mkdir(cwd)
+    const project = { cwd, retentionDays: 0 }
+    const { task: shell } = await manager.runBuild({ cwd, name: "shell", command: "exit 0", timeoutMs: 4_000 })
+    expect(shell).toMatchObject({ status: "succeeded", shell: true })
+    const { task: running } = await manager.runBuild({ cwd, name: "running", command: "exec sleep 30", wait: false })
+    const { task: lost } = await manager.runBuild({ cwd, name: "lost", command: "exec sleep 30", wait: false })
+    const mux = createMuxClient(backend, runner)
+    await mux.killPane(lost.paneId)
+    const manual = await tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${projectMuxSession(cwd)}:`, "sleep 30")
+    expect(manual.exitCode).toBe(0)
+    const candidates = await manager.previewHistory(project)
+    expect(candidates.map(({ id }) => id)).toEqual([lost.id])
+    expect(await manager.cleanHistory({ ...project, candidates })).toEqual({ removed: [lost.id], skipped: [], failed: [] })
+    const withShell = { ...project, includeShell: true }
+    const shellCandidates = await manager.previewHistory(withShell)
+    expect(shellCandidates.map(({ id }) => id)).toEqual([shell.id])
+    expect(await manager.cleanHistory({ ...withShell, candidates: shellCandidates })).toEqual({ removed: [shell.id], skipped: [], failed: [] })
+    const remaining = (await mux.listPanes()).filter((pane) => pane.sessionName === projectMuxSession(cwd))
+    expect(remaining.map(({ paneId }) => paneId).sort()).toEqual([running.paneId, manual.stdout.trim()].sort())
+    await manager.closeSession({ cwd })
+  })
+
   it("retains pane options and remain-on-exit across direct respawn-pane -k", async () => {
     const mux = createMuxClient(backend, runner)
     const paneId = await mux.createManagedPane({
@@ -343,4 +367,63 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
       expect(keys.stdout).toMatch(new RegExp(`\\b${key}\\s`))
     }
   })
+})
+
+it.skipIf(absent || process.platform === "win32")("loads explicit tmux.conf only when the isolated server starts", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "oc-mux-explicit-"))
+  const socketName = `oc-mux-conf-${randomUUID()}`
+  const config = join(dir, "host config.conf")
+  const cwd = join(dir, "workspace")
+  const run = createCommandRunner()
+  const calls: string[][] = []
+  const runner: CommandRunner = (file, args, options) => {
+    if (file !== "tmux" || args[0] !== "-L" || args[1] !== socketName) {
+      throw new Error("Integration tests may only access the isolated tmux server")
+    }
+    calls.push([...args.slice(2)])
+    return run(file, args, {
+      ...options, env: { ...process.env, ...options?.env, HOME: dir, XDG_CONFIG_HOME: dir, TMUX_TMPDIR: dir, TMUX: undefined },
+    })
+  }
+  const tmux = (...args: string[]) => runner("tmux", ["-L", socketName, ...args])
+  const writeConfig = (style: string) => writeFile(config, [
+    `set-option -g status-style ${style}`,
+    `set-option -gw window-status-current-style ${style}`,
+    "set-option -g key-table host-keys",
+    "bind-key -T host-keys F4 next-window",
+    "",
+  ].join("\n"))
+
+  try {
+    await mkdir(cwd)
+    await writeFile(join(cwd, "tmux.conf"), "set-option -g status-style bg=red\n")
+    const originalStyle = "fg=white,bg=blue"
+    await writeConfig(originalStyle)
+    const client = createMuxClient({ kind: "tmux", socketName, tmuxConfig: config }, runner)
+    const task = { id: "first", role: "service", name: "first", cwd, command: "sleep 30", muxSession: "one" } as const
+    const first = await client.createManagedPane(task)
+    await writeConfig("fg=black,bg=white")
+    const second = await client.createManagedPane({ ...task, id: "second", name: "second" })
+    const third = await client.createManagedPane({ ...task, id: "third", name: "third", muxSession: "two" })
+    for (const session of ["one", "two"]) {
+      expect((await tmux("show-options", "-Av", "-t", session, "status-style")).stdout.trim()).toBe(originalStyle)
+      expect((await tmux("show-options", "-Av", "-t", session, "key-table")).stdout.trim()).toBe("host-keys")
+    }
+    for (const paneId of [first, second, third]) {
+      expect((await tmux("show-options", "-Awv", "-t", paneId, "window-status-current-style")).stdout.trim()).toBe(originalStyle)
+    }
+    expect(calls.filter((args) => args.includes("-f")).map((args) => args.slice(0, 6))).toEqual(
+      ["one", "one", "two"].map((session) => ["-f", config, "new-session", "-d", "-s", session]),
+    )
+    expect(calls.some((args) => args[0] === "source-file")).toBe(false)
+  } finally {
+    try {
+      const result = await tmux("kill-server")
+      if (result.exitCode !== 0 && !/no server running|No such file or directory/.test(result.stderr)) {
+        throw new Error(`Failed to remove the isolated tmux server: ${result.stderr}`)
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
 })

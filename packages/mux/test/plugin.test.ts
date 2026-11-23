@@ -53,15 +53,15 @@ describe("插件入口", () => {
     h.reload()
     h.reload()
     expect(h.transform).toHaveBeenCalledTimes(1)
-    expect(reg.add).toHaveBeenCalledTimes(6)
+    expect(reg.add).toHaveBeenCalledTimes(7)
     expect(reg.tools.find(({ name }) => name === "mux_logs")).toBe(existing)
     expect(reg.tools.map(({ name }) => name).sort()).toEqual([
-      "mux_input", "mux_list", "mux_logs", "mux_remove", "mux_restart", "mux_run_build", "mux_service",
+      "mux_clean_history", "mux_input", "mux_list", "mux_logs", "mux_remove", "mux_restart", "mux_run_build", "mux_service",
     ])
     const fresh = registry()
     h.reload(fresh.editor)
     h.reload(fresh.editor)
-    expect(fresh.add).toHaveBeenCalledTimes(7)
+    expect(fresh.add).toHaveBeenCalledTimes(8)
     for (const tool of fresh.tools) {
       expect(tool.input).toMatchObject({ type: "object", additionalProperties: false })
       expect(tool).not.toHaveProperty("output")

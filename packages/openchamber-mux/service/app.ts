@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type RequestListener, type ServerResponse } from "node:http"
-import { isSafeTaskId, MuxCommandError, MuxError, type ManagedTask, type MuxErrorCode, type MuxManager } from "@misakacloud/opencode-mux-core"
+import { isSafeTaskId, MuxCommandError, MuxError, type HistoryCandidate, type ManagedTask, type MuxErrorCode, type MuxManager } from "@misakacloud/opencode-mux-core"
 import type {
-  ErrorResponse, HealthResponse, InputBody, LogsResponse, PruneBody, PruneResponse,
+  ErrorResponse, HealthResponse, HistoryCleanBody, HistoryCleanResponse, HistoryPreviewBody,
+  HistoryPreviewResponse, InputBody, LogsResponse, PruneBody, PruneResponse,
   RestartTaskBody, RunBuildBody, RunBuildHttpResponse, ServiceActionBody,
   ServiceActionHttpResponse, SessionCloseBody, SessionCloseResponse, StopTaskBody, TasksResponse, TaskView,
 } from "../src/types"
@@ -77,10 +78,36 @@ function optionalBoolean(value: unknown, field: string): boolean | undefined {
   throw new HttpError(400, `Invalid ${field}`)
 }
 
-function optionalInteger(value: unknown, field: string): number | undefined {
-  if (value === undefined) return undefined
+function integer(value: unknown, field: string): number {
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_INTEGER) return value
   throw new HttpError(400, `Invalid ${field}`)
+}
+
+function optionalInteger(value: unknown, field: string): number | undefined {
+  return value === undefined ? undefined : integer(value, field)
+}
+
+function historyOptions(body: Record<string, unknown>): HistoryPreviewBody {
+  return {
+    cwd: text(body.cwd, "cwd"),
+    includeShell: optionalBoolean(body.includeShell, "includeShell"),
+    retentionDays: optionalInteger(body.retentionDays, "retentionDays"),
+  }
+}
+
+function historyCandidates(value: unknown): HistoryCandidate[] {
+  if (!Array.isArray(value)) throw new HttpError(400, "Invalid candidates")
+  return value.map((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new HttpError(400, "Invalid candidates")
+    }
+    const record = item as Record<string, unknown>
+    return {
+      id: text(record.id, "candidates.id"),
+      updatedAt: text(record.updatedAt, "candidates.updatedAt"),
+      restartCount: integer(record.restartCount, "candidates.restartCount"),
+    }
+  })
 }
 
 function oneOf<T extends string>(value: unknown, field: string, values: readonly T[]): T
@@ -176,6 +203,19 @@ export function createServiceHandler({ manager, token }: ServiceOptions): Reques
         role: oneOf(body.role, "role", ROLES, true),
       }
       return { pruned: await manager.pruneGone(filter) } satisfies PruneResponse
+    }
+    if (method === "POST" && pathname === "/history/preview") {
+      const body = await readBody(request)
+      const input = historyOptions(body)
+      return { tasks: await manager.previewHistory(input) } satisfies HistoryPreviewResponse
+    }
+    if (method === "POST" && pathname === "/history/clean") {
+      const body = await readBody(request)
+      const input: HistoryCleanBody = {
+        ...historyOptions(body),
+        candidates: historyCandidates(body.candidates),
+      }
+      return (await manager.cleanHistory(input)) satisfies HistoryCleanResponse
     }
     if (method === "POST" && pathname === "/session/close") {
       const body = await readBody(request)

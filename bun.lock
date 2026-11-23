@@ -72,7 +72,7 @@
       "name": "@misakacloud/opencode-mux",
       "version": "0.1.0",
       "dependencies": {
-        "@misakacloud/opencode-mux-core": "^0.1.0",
+        "@misakacloud/opencode-mux-core": "^0.1.3",
       },
       "devDependencies": {
         "@opencode/plugin": "2.0.31",
@@ -87,7 +87,7 @@
     },
     "packages/mux-core": {
       "name": "@misakacloud/opencode-mux-core",
-      "version": "0.1.0",
+      "version": "0.1.3",
       "devDependencies": {
         "@types/node": "^25.6.0",
         "typescript": "^6.0.3",

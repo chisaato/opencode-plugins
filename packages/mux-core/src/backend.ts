@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { assertTmuxConfigTarget, validateTmuxBackendConfig } from "./config"
 import type { CommandRunner, DetectMuxBackendOptions, MuxBackend } from "./types"
 
 /** 执行复用器命令时不经过宿主 shell。 */
@@ -22,14 +23,17 @@ export function createCommandRunner(): CommandRunner {
 }
 
 export async function detectMuxBackend({
-  runner = createCommandRunner(), platform = process.platform, preferred, socketName,
+  runner = createCommandRunner(), platform = process.platform, preferred, socketName, tmuxConfig,
 }: DetectMuxBackendOptions = {}): Promise<MuxBackend | null> {
   const fallback = platform === "win32" ? ["psmux", "tmux"] as const : ["tmux", "psmux"] as const
-  const kinds = preferred ? [preferred, ...fallback.filter((kind) => kind !== preferred)] : fallback
+  const configured = tmuxConfig === undefined ? undefined : { kind: "tmux" as const, executable: "tmux", platform, socketName, tmuxConfig }
+  if (configured) await validateTmuxBackendConfig(configured)
+  const kinds = configured ? ["tmux"] as const
+    : preferred ? [preferred, ...fallback.filter((kind) => kind !== preferred)] : fallback
   for (const kind of kinds) {
     try {
       if ((await runner(kind, ["-V"], { timeoutMs: 2_000 })).exitCode === 0) {
-        return { kind, executable: kind, platform, socketName }
+        return configured ?? { kind, executable: kind, platform, socketName }
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
@@ -44,7 +48,13 @@ export function quotePosixShell(value: string): string {
 }
 
 export function muxCommandArgs(backend: MuxBackend, args: readonly string[]): string[] {
-  return backend.socketName ? ["-L", backend.socketName, ...args] : [...args]
+  const socket = backend.socketName ? ["-L", backend.socketName] : []
+  // tmux 仅在启动 server 时处理 -f；不要给 attach 或其他命令传宿主配置。
+  if (args[0] === "new-session" && backend.tmuxConfig !== undefined) {
+    assertTmuxConfigTarget(backend)
+    return [...socket, "-f", backend.tmuxConfig, ...args]
+  }
+  return [...socket, ...args]
 }
 
 function useCmd(backend: MuxBackend): boolean {

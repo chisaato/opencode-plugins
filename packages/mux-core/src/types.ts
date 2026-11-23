@@ -75,6 +75,8 @@ export interface MuxBackend {
   executable?: string
   socketName?: string
   platform?: NodeJS.Platform
+  /** 可信宿主配置的绝对路径；仅在专用 tmux server 启动时读取。 */
+  tmuxConfig?: string
 }
 
 export interface DetectMuxBackendOptions {
@@ -82,6 +84,8 @@ export interface DetectMuxBackendOptions {
   platform?: NodeJS.Platform
   preferred?: MuxKind
   socketName?: string
+  /** 可信宿主配置的绝对路径；必须同时指定专用 socket。 */
+  tmuxConfig?: string
 }
 
 export interface ManagedPaneOptions {

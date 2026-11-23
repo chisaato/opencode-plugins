@@ -28,6 +28,10 @@ function fakeManager() {
     captureLogs: vi.fn<MuxManager["captureLogs"]>().mockResolvedValue("captured\noutput"),
     sendInput: vi.fn<MuxManager["sendInput"]>().mockResolvedValue(undefined),
     pruneGone: vi.fn<MuxManager["pruneGone"]>().mockResolvedValue([{ ...task, status: "gone" }]),
+    previewHistory: vi.fn<MuxManager["previewHistory"]>().mockResolvedValue([{ ...task, status: "gone" }]),
+    cleanHistory: vi.fn<MuxManager["cleanHistory"]>().mockResolvedValue({
+      removed: [task.id], skipped: [], failed: [],
+    }),
   } satisfies MuxManager
 }
 
@@ -203,6 +207,41 @@ describe("OpenChamber Mux HTTP service", () => {
     expect(manager.pruneGone).toHaveBeenCalledWith(filter)
   })
 
+  it("previews and cleans project history with strict input validation", async () => {
+    const previewInput = { cwd: task.cwd, includeShell: true, retentionDays: 14 }
+    expect(await post("/history/preview", previewInput)).toEqual({
+      status: 200,
+      body: { tasks: [{ ...task, status: "gone" }] },
+    })
+    expect(manager.previewHistory).toHaveBeenCalledWith(previewInput)
+
+    const cleanInput = {
+      cwd: task.cwd,
+      includeShell: false,
+      retentionDays: 7,
+      candidates: [{ id: task.id, updatedAt: task.updatedAt, restartCount: 0 }],
+    }
+    expect(await post("/history/clean", cleanInput)).toEqual({
+      status: 200,
+      body: { removed: [task.id], skipped: [], failed: [] },
+    })
+    expect(manager.cleanHistory).toHaveBeenCalledWith(cleanInput)
+
+    expect(await post("/history/clean", { cwd: task.cwd, candidates: [] })).toEqual({
+      status: 200,
+      body: { removed: [task.id], skipped: [], failed: [] },
+    })
+  })
+
+  it("returns 503 for history endpoints when mux backend is unavailable", async () => {
+    const error = new MuxError("BACKEND_UNAVAILABLE", "No tmux or psmux executable found")
+    manager.previewHistory.mockRejectedValueOnce(error)
+    expect(await post("/history/preview", { cwd: task.cwd })).toEqual({
+      status: 503,
+      body: { error: error.message, code: "BACKEND_UNAVAILABLE" },
+    })
+  })
+
   it("rejects invalid JSON, non-object JSON, missing fields, and invalid field/query values", async () => {
     expect(await call("/builds", { method: "POST", body: "{oops" })).toEqual({ status: 400, body: { error: "Invalid JSON" } })
     expect((await call("/prune", { method: "POST", body: "[]" })).status).toBe(400)
@@ -214,10 +253,24 @@ describe("OpenChamber Mux HTTP service", () => {
     expect((await post(`/tasks/${task.id}/stop`, { force: 1 })).status).toBe(400)
     expect((await post(`/tasks/${task.id}/input`, {})).status).toBe(400)
     expect((await post("/prune", { role: "other" })).status).toBe(400)
+    expect((await post("/history/preview", {})).status).toBe(400)
+    expect((await post("/history/preview", { cwd: "   " })).status).toBe(400)
+    expect((await post("/history/preview", { cwd: task.cwd, includeShell: "yes" })).status).toBe(400)
+    expect((await post("/history/preview", { cwd: task.cwd, retentionDays: -1 })).status).toBe(400)
+    expect((await post("/history/preview", { cwd: task.cwd, retentionDays: 1.5 })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd, candidates: "bad" })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd, candidates: [null] })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd, candidates: [{ id: "", updatedAt: task.updatedAt, restartCount: 0 }] })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd, candidates: [{ id: task.id, updatedAt: "", restartCount: 0 }] })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd, candidates: [{ id: task.id, updatedAt: task.updatedAt, restartCount: -1 }] })).status).toBe(400)
+    expect((await post("/history/clean", { cwd: task.cwd, candidates: [{ id: task.id, updatedAt: task.updatedAt }] })).status).toBe(400)
     expect((await call("/tasks?status=waiting")).status).toBe(400)
     expect((await call(`/tasks/${task.id}/logs?lines=1e3`)).status).toBe(400)
     expect(manager.runBuild).not.toHaveBeenCalled()
     expect(manager.sendInput).not.toHaveBeenCalled()
+    expect(manager.previewHistory).not.toHaveBeenCalled()
+    expect(manager.cleanHistory).not.toHaveBeenCalled()
   })
 
   it("returns 400 when starting a new service without the required command", async () => {

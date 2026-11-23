@@ -31,6 +31,7 @@ import {
   type FormattedError,
 } from "../src/ui/client"
 import { createLogViewport, type LogViewport } from "../src/ui/log-viewer"
+import { createHistoryDialogController } from "../src/ui/history"
 import { createPoller } from "../src/ui/poller"
 import { injectStyle, MUX_SHARED_CSS } from "../src/ui/styles"
 import {
@@ -580,6 +581,8 @@ ${MUX_SHARED_CSS}
 
 .mux-dialog {
   width: min(420px, 100%);
+  max-height: 90dvh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -589,6 +592,10 @@ ${MUX_SHARED_CSS}
   background: var(--surface-elevated, var(--oc-elevated, var(--surface-background, var(--oc-bg, #1c1c1e))));
   color: var(--oc-elevated-fg, var(--oc-fg, inherit));
   box-shadow: var(--oc-sdk-float, 0 12px 32px rgb(0 0 0 / 0.28));
+}
+
+.mux-dialog--wide {
+  width: min(480px, 100%);
 }
 
 .mux-dialog-head {
@@ -602,6 +609,10 @@ ${MUX_SHARED_CSS}
   font-size: 0.9375rem;
   font-weight: 600;
   color: var(--oc-error-text, var(--oc-error, #ef4444));
+}
+
+.mux-dialog-title--neutral {
+  color: var(--oc-fg, inherit);
 }
 
 .mux-dialog-meta {
@@ -636,6 +647,123 @@ ${MUX_SHARED_CSS}
   justify-content: flex-end;
   gap: 8px;
   padding-top: 2px;
+}
+
+.mux-history-summary {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--oc-fg, inherit);
+}
+
+.mux-history-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(240px, 38dvh);
+  overflow-y: auto;
+  border-radius: calc(var(--oc-radius, 9px) - 2px);
+  border: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 65%, transparent);
+  background: color-mix(in srgb, var(--oc-fg, currentColor) 2.5%, transparent);
+}
+
+.mux-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 45%, transparent);
+}
+
+.mux-history-item:last-child {
+  border-bottom: 0;
+}
+
+.mux-history-row-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 6px;
+  min-width: 0;
+}
+
+.mux-history-name {
+  flex: 1 1 120px;
+  min-width: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--oc-fg, inherit);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mux-history-time {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  color: var(--oc-muted, inherit);
+  white-space: nowrap;
+}
+
+.mux-history-cmd {
+  font-size: 0.72rem;
+  color: var(--oc-muted, inherit);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mux-history-empty {
+  padding: 16px 12px;
+  border-radius: calc(var(--oc-radius, 9px) - 2px);
+  border: 1px dashed color-mix(in srgb, var(--oc-border, currentColor) 65%, transparent);
+  font-size: 0.8rem;
+  color: var(--oc-muted, inherit);
+  text-align: center;
+}
+
+.mux-history-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: calc(var(--oc-radius, 9px) - 2px);
+  border: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 65%, transparent);
+  background: color-mix(in srgb, var(--oc-fg, currentColor) 3%, transparent);
+  font-size: 0.78rem;
+}
+
+.mux-history-result-counts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mux-history-result-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mux-history-result-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--oc-fg, inherit);
+}
+
+.mux-history-result-items {
+  margin: 0;
+  padding-left: 16px;
+  max-height: 120px;
+  overflow-y: auto;
+  font-size: 0.74rem;
+  color: var(--oc-muted, inherit);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mux-history-result-items--error {
+  color: var(--oc-error-text, var(--oc-error, #ef4444));
 }
 `
 
@@ -752,17 +880,14 @@ if (root) {
   const headerActions = document.createElement("div")
   headerActions.className = "mux-panel-header-actions"
 
-  const pruneBtn = mountButton(headerActions, {
-    label: "清理失效",
+  const cleanHistoryBtn = mountButton(headerActions, {
+    label: "清理历史",
     variant: "ghost",
     size: "sm",
     onClick: () => {
-      void runAction("prune", async () => {
-        const res = await client.prune({
-          cwd: scope === "project" && currentDirectory ? currentDirectory : undefined,
-        })
-        showToast("success", `已清理 ${res.pruned.length} 条已失效任务`)
-      })
+      if (historyController.open()) {
+        historyDialogCancelNode?.focus()
+      }
     },
   })
 
@@ -785,7 +910,7 @@ if (root) {
     },
   })
 
-  const pruneBtnNode = headerActions.children[0] as HTMLElement
+  const cleanHistoryBtnNode = headerActions.children[0] as HTMLElement
   headerEl.append(titleGroup, headerActions)
 
   // --- 新建任务卡片 ---
@@ -1267,8 +1392,318 @@ if (root) {
     renderCloseDialog()
   })
 
+  // --- 清理历史确认弹层 ---
+  const historyDialogBackdrop = document.createElement("div")
+  historyDialogBackdrop.className = "mux-dialog-backdrop"
+  historyDialogBackdrop.hidden = true
+
+  const historyDialogEl = document.createElement("div")
+  historyDialogEl.className = "mux-dialog mux-dialog--wide oc-sdk-popup"
+  historyDialogEl.setAttribute("role", "dialog")
+  historyDialogEl.setAttribute("aria-modal", "true")
+  historyDialogEl.setAttribute("aria-labelledby", "mux-history-dialog-title")
+
+  const historyDialogHead = document.createElement("div")
+  historyDialogHead.className = "mux-dialog-head"
+  const historyDialogTitle = document.createElement("h2")
+  historyDialogTitle.id = "mux-history-dialog-title"
+  historyDialogTitle.className = "mux-dialog-title mux-dialog-title--neutral"
+  historyDialogTitle.textContent = "清理历史记录"
+  const historyDialogMeta = document.createElement("div")
+  historyDialogMeta.className = "mux-dialog-meta"
+  historyDialogHead.append(historyDialogTitle, historyDialogMeta)
+
+  const historyOptionSlot = document.createElement("div")
+  const historyIncludeShellCheck: CheckboxHandle = mountCheckbox(historyOptionSlot, {
+    label: "包含驻留 shell 任务",
+    description: "同时关闭对应终端窗格",
+    checked: false,
+    onChange: (checked) => {
+      historyController.setIncludeShell(checked)
+    },
+  })
+
+  const historyLoadingSlot = document.createElement("div")
+  historyLoadingSlot.hidden = true
+  const historySpinner = mountSpinner(historyLoadingSlot, { size: "sm", label: "正在扫描可清理记录..." })
+
+  const historySummaryEl = document.createElement("div")
+  historySummaryEl.className = "mux-history-summary"
+  historySummaryEl.hidden = true
+
+  const historyPreviewList = document.createElement("div")
+  historyPreviewList.className = "mux-history-list"
+  historyPreviewList.hidden = true
+
+  const historyEmptyEl = document.createElement("div")
+  historyEmptyEl.className = "mux-history-empty"
+  historyEmptyEl.hidden = true
+
+  const historyResultEl = document.createElement("div")
+  historyResultEl.className = "mux-history-result"
+  historyResultEl.hidden = true
+
+  const historyErrorEl = document.createElement("div")
+  historyErrorEl.className = "mux-dialog-error"
+  historyErrorEl.hidden = true
+
+  const historyDialogFoot = document.createElement("div")
+  historyDialogFoot.className = "mux-dialog-foot"
+  const historyCancelBtn = mountButton(historyDialogFoot, {
+    label: "取消",
+    variant: "outline",
+    size: "sm",
+    onClick: () => {
+      historyController.close()
+    },
+  })
+  const historyRetryBtn = mountButton(historyDialogFoot, {
+    label: "重新扫描",
+    variant: "default",
+    size: "sm",
+    onClick: () => {
+      historyController.retryPreview()
+    },
+  })
+  const historyConfirmBtn = mountButton(historyDialogFoot, {
+    label: "确认清理",
+    variant: "destructive",
+    size: "sm",
+    onClick: () => {
+      void historyController.confirm()
+    },
+  })
+  const [historyDialogCancelNode, historyRetryNode, historyConfirmNode] = Array.from(
+    historyDialogFoot.children,
+  ) as HTMLElement[]
+
+  historyDialogEl.append(
+    historyDialogHead,
+    historyOptionSlot,
+    historyLoadingSlot,
+    historySummaryEl,
+    historyPreviewList,
+    historyEmptyEl,
+    historyResultEl,
+    historyErrorEl,
+    historyDialogFoot,
+  )
+  historyDialogBackdrop.append(historyDialogEl)
+
+  historyDialogBackdrop.addEventListener("click", (event) => {
+    if (event.target !== historyDialogBackdrop) return
+    historyController.close()
+  })
+
+  function clearRemovedTaskUiState(removedIds: readonly string[]): void {
+    for (const id of removedIds) {
+      if (selectedTaskId === id) selectedTaskId = null
+      if (confirmRemoveTaskId === id) confirmRemoveTaskId = null
+      if (inspConfirmRemoveTaskId === id) inspConfirmRemoveTaskId = null
+      stopTimedOutIds.delete(id)
+      stdinDrafts.delete(id)
+    }
+  }
+
+  function renderHistoryDialog(): void {
+    const state = historyController.getState()
+    historyDialogBackdrop.hidden = !state
+    if (!state) return
+
+    historyDialogMeta.textContent = ""
+    const pathSpan = document.createElement("span")
+    pathSpan.className = "mux-mono"
+    pathSpan.textContent = shortPath(state.targetCwd)
+    pathSpan.title = state.targetCwd
+    historyDialogMeta.append(pathSpan, "·", "失效记录及超过 7 天已结束任务")
+
+    historyIncludeShellCheck.update({
+      checked: state.includeShell,
+      disabled: state.cleaning,
+    })
+
+    historyLoadingSlot.hidden = !state.previewLoading
+
+    const showPreview = !state.previewLoading && !state.previewError && state.cleanResult === null
+    if (showPreview && state.previewTasks.length > 0) {
+      const shellCount = state.previewTasks.filter((t) => t.shell).length
+      historySummaryEl.hidden = false
+      historySummaryEl.textContent = shellCount > 0
+        ? `共 ${state.previewTasks.length} 条可清理记录（含 ${shellCount} 个驻留 shell）`
+        : `共 ${state.previewTasks.length} 条可清理记录`
+
+      historyPreviewList.hidden = false
+      historyPreviewList.textContent = ""
+      for (const item of state.previewTasks) {
+        const row = document.createElement("div")
+        row.className = "mux-history-item"
+
+        const rowTop = document.createElement("div")
+        rowTop.className = "mux-history-row-top"
+        const dot = document.createElement("span")
+        dot.className = "mux-dot"
+        dot.dataset.status = item.status
+        const nameEl = document.createElement("span")
+        nameEl.className = "mux-history-name"
+        nameEl.textContent = item.name
+        nameEl.title = item.name
+
+        const rolePill = document.createElement("span")
+        rolePill.className = "mux-pill"
+        rolePill.textContent = roleLabel(item.role)
+
+        const statusMetaInfo = statusMeta(item.status)
+        const statusPill = document.createElement("span")
+        statusPill.className = "mux-pill"
+        if (statusMetaInfo.tone !== "neutral") {
+          statusPill.dataset.tone = statusMetaInfo.tone
+        }
+        statusPill.textContent = statusMetaInfo.label
+
+        rowTop.append(dot, nameEl, rolePill, statusPill)
+
+        if (item.shell) {
+          const shellPill = document.createElement("span")
+          shellPill.className = "mux-pill"
+          shellPill.dataset.tone = "warning"
+          shellPill.textContent = "驻留 shell"
+          rowTop.append(shellPill)
+        }
+
+        const timeEl = document.createElement("span")
+        timeEl.className = "mux-history-time mux-num"
+        timeEl.textContent = formatRelativeTime(item.updatedAt)
+        timeEl.title = item.updatedAt
+        rowTop.append(timeEl)
+
+        const cmdEl = document.createElement("div")
+        cmdEl.className = "mux-history-cmd mux-mono"
+        cmdEl.textContent = `$ ${item.command}`
+        cmdEl.title = item.command
+
+        row.append(rowTop, cmdEl)
+        historyPreviewList.append(row)
+      }
+      historyEmptyEl.hidden = true
+    } else {
+      historySummaryEl.hidden = true
+      historyPreviewList.hidden = true
+      if (showPreview) {
+        historyEmptyEl.hidden = false
+        historyEmptyEl.textContent = state.includeShell
+          ? "当前项目暂无可清理的历史记录"
+          : "当前项目暂无可清理的历史记录（默认保留驻留 shell）"
+      } else {
+        historyEmptyEl.hidden = true
+      }
+    }
+
+    if (state.cleanResult !== null) {
+      const res = state.cleanResult
+      historyResultEl.hidden = false
+      historyResultEl.textContent = ""
+
+      const countsRow = document.createElement("div")
+      countsRow.className = "mux-history-result-counts"
+      const removedPill = document.createElement("span")
+      removedPill.className = "mux-pill mux-num"
+      removedPill.dataset.tone = res.removed.length > 0 ? "success" : "neutral"
+      removedPill.textContent = `已清理 ${res.removed.length} 项`
+      countsRow.append(removedPill)
+      if (res.skipped.length > 0) {
+        const skippedPill = document.createElement("span")
+        skippedPill.className = "mux-pill mux-num"
+        skippedPill.dataset.tone = "warning"
+        skippedPill.textContent = `已跳过 ${res.skipped.length} 项`
+        countsRow.append(skippedPill)
+      }
+      if (res.failed.length > 0) {
+        const failedPill = document.createElement("span")
+        failedPill.className = "mux-pill mux-num"
+        failedPill.dataset.tone = "error"
+        failedPill.textContent = `失败 ${res.failed.length} 项`
+        countsRow.append(failedPill)
+      }
+      historyResultEl.append(countsRow)
+
+      if (res.skipped.length > 0) {
+        const group = document.createElement("div")
+        group.className = "mux-history-result-group"
+        const label = document.createElement("div")
+        label.className = "mux-history-result-label"
+        label.textContent = "已跳过（状态已变化）"
+        const list = document.createElement("ul")
+        list.className = "mux-history-result-items"
+        for (const id of res.skipped) {
+          const li = document.createElement("li")
+          li.textContent = state.previewNameById.get(id) ?? id
+          list.append(li)
+        }
+        group.append(label, list)
+        historyResultEl.append(group)
+      }
+
+      if (res.failed.length > 0) {
+        const group = document.createElement("div")
+        group.className = "mux-history-result-group"
+        const label = document.createElement("div")
+        label.className = "mux-history-result-label"
+        label.textContent = "清理失败"
+        const list = document.createElement("ul")
+        list.className = "mux-history-result-items mux-history-result-items--error"
+        for (const entry of res.failed) {
+          const li = document.createElement("li")
+          const taskName = state.previewNameById.get(entry.id) ?? entry.id
+          li.textContent = `${taskName}：${entry.message}`
+          list.append(li)
+        }
+        group.append(label, list)
+        historyResultEl.append(group)
+      }
+    } else {
+      historyResultEl.hidden = true
+    }
+
+    const errorMessage = state.previewError || state.cleanError
+    historyErrorEl.hidden = !errorMessage
+    if (errorMessage) {
+      historyErrorEl.textContent = errorMessage
+    }
+
+    const showRetry = Boolean(state.previewError) || state.cleanResult !== null
+    historyCancelBtn.update({
+      label: state.cleanResult !== null ? "关闭" : "取消",
+      disabled: state.cleaning,
+    })
+    historyRetryNode.hidden = !showRetry
+    historyRetryBtn.update({
+      disabled: state.cleaning,
+    })
+    historyConfirmNode.hidden = showRetry
+    historyConfirmBtn.update({
+      label: state.previewTasks.length > 0 ? `确认清理 (${state.previewTasks.length})` : "确认清理",
+      loading: state.cleaning,
+      disabled: state.previewLoading || state.cleaning || state.previewTasks.length === 0,
+    })
+  }
+
+  const historyController = createHistoryDialogController({
+    client,
+    getCurrentDirectory: () => currentDirectory,
+    onChange: renderHistoryDialog,
+    onRemoved: clearRemovedTaskUiState,
+    onNotify: showToast,
+    onRefresh: () => {
+      void poller.triggerNow()
+    },
+  })
+
   const handleGlobalKeydown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return
+    if (historyController.getState()) {
+      historyController.close()
+      return
+    }
     if (pendingCloseSession) {
       if (busyActions.has(sessionBusyKey(pendingCloseSession.muxSession))) return
       pendingCloseSession = null
@@ -1293,6 +1728,7 @@ if (root) {
     globalEmptySlot,
     workspaceEl,
     closeDialogBackdrop,
+    historyDialogBackdrop,
   )
 
   // --- 事件绑定 ---
@@ -2220,11 +2656,17 @@ if (root) {
     scopeProjectBtn.setAttribute("aria-pressed", scope === "project" ? "true" : "false")
     scopeAllBtn.setAttribute("aria-pressed", scope === "all" ? "true" : "false")
 
-    pruneBtnNode.hidden = counts.gone === 0
-    pruneBtn.update({
-      label: `清理失效 (${counts.gone})`,
-      loading: busyActions.has("prune"),
-    })
+    cleanHistoryBtnNode.hidden = currentDirectory === null
+    if (currentDirectory !== null) {
+      cleanHistoryBtn.update({
+        label: scope === "project" ? "清理历史" : "清理本项目历史",
+        disabled: backend === null,
+      })
+      cleanHistoryBtnNode.title =
+        scope === "project"
+          ? "清理失效记录及超过 7 天的已结束任务"
+          : `仅清理当前项目：${currentDirectory}`
+    }
     refreshBtn.update({ loading: refreshing })
 
     renderLauncher()
@@ -2486,6 +2928,7 @@ if (root) {
       scope = "all"
     }
     if (changed) {
+      historyController.onDirectoryChange(normalized)
       render()
       if (shouldTrigger) void poller.triggerNow({ invalidate: true })
     }
@@ -2509,7 +2952,7 @@ if (root) {
     window.removeEventListener("keydown", handleGlobalKeydown)
     poller.dispose()
     backendBadge.dispose()
-    pruneBtn.dispose()
+    cleanHistoryBtn.dispose()
     toggleLauncherBtn.dispose()
     refreshBtn.dispose()
     nameField.dispose()
@@ -2531,6 +2974,11 @@ if (root) {
     inspConfirmOkBtn.dispose()
     closeDialogCancelBtn.dispose()
     closeDialogConfirmBtn.dispose()
+    historyIncludeShellCheck.dispose()
+    historySpinner.dispose()
+    historyCancelBtn.dispose()
+    historyRetryBtn.dispose()
+    historyConfirmBtn.dispose()
     linesSelect.dispose()
     autoRefreshSwitch.dispose()
     refreshLogsBtn.dispose()

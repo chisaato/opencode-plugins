@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { muxCommandArgs, stripAnsi, supportsPosixMuxFeatures, wrapShellCommand } from "./backend"
+import { assertTmuxConfigTarget, validateTmuxBackendConfig } from "./config"
 import type { CommandOptions, CommandResult, CommandRunner, LivePaneInfo, ManagedPaneOptions, MuxBackend, StatusTheme } from "./types"
 
 const OPTIONS = {
@@ -159,6 +160,7 @@ interface MuxClientOptions {
 }
 
 export function createMuxClient(backend: MuxBackend, runner: CommandRunner, options: MuxClientOptions = {}) {
+  assertTmuxConfigTarget(backend)
   const run = (args: readonly string[], options?: CommandOptions) =>
     runner(backend.executable ?? backend.kind, muxCommandArgs(backend, args), options)
   const checked = async (args: readonly string[], options?: CommandOptions) => {
@@ -273,6 +275,7 @@ export function createMuxClient(backend: MuxBackend, runner: CommandRunner, opti
   }
 
   async function createManagedPane(task: ManagedPaneOptions): Promise<string> {
+    if (backend.tmuxConfig !== undefined) await validateTmuxBackendConfig(backend)
     const placeholder = wrapShellCommand(backend, backend.kind === "psmux" || (backend.platform ?? process.platform) === "win32"
       ? "ping -t 127.0.0.1 >nul" : "exec sleep 86400")
     const common = ["-c", task.cwd, "-P", "-F", "#{pane_id}", ...placeholder]
@@ -291,7 +294,7 @@ export function createMuxClient(backend: MuxBackend, runner: CommandRunner, opti
       }
       await checked(remain)
       await setMetadata(paneId, task)
-      await applySessionTheme(task.muxSession, paneId, options.statusTheme ?? "powerline")
+      await applySessionTheme(task.muxSession, paneId, options.statusTheme ?? (backend.tmuxConfig === undefined ? "powerline" : "off"))
       if (options.byobuKeys && supportsPosixMuxFeatures(backend)) await enableByobuKeys(task.muxSession)
       await respawnPane(paneId, task, task.id)
     } catch (error) {

@@ -25,5 +25,7 @@ console.log(JSON.stringify(registered.map(({ name }) => name)));`], {
     encoding: "utf8",
     input: bundle,
   })
-  expect(JSON.parse(toolNames)).toEqual(["mux_run_build", "mux_service", "mux_restart", "mux_logs", "mux_input", "mux_remove", "mux_list"])
+  expect(JSON.parse(toolNames)).toEqual([
+    "mux_run_build", "mux_service", "mux_restart", "mux_logs", "mux_input", "mux_remove", "mux_list", "mux_clean_history",
+  ])
 })

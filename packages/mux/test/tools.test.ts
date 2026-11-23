@@ -29,6 +29,8 @@ function harness(defaults?: Parameters<typeof createMuxTools>[2]) {
     sendInput: vi.fn<Manager["sendInput"]>().mockResolvedValue(undefined),
     listTasks: vi.fn<Manager["listTasks"]>().mockResolvedValue([task()]),
     pruneGone: vi.fn<Manager["pruneGone"]>().mockResolvedValue([]),
+    previewHistory: vi.fn<Manager["previewHistory"]>().mockResolvedValue([]),
+    cleanHistory: vi.fn<Manager["cleanHistory"]>().mockResolvedValue({ removed: [], skipped: [], failed: [] }),
     attachCommand: vi.fn<Manager["attachCommand"]>().mockResolvedValue(cmd),
   }
   const tools = createMuxTools(manager, project, defaults)
@@ -236,5 +238,35 @@ describe("mux_list", () => {
     expect(manager.pruneGone.mock.invocationCallOrder[0]).toBeLessThan(manager.listTasks.mock.invocationCallOrder[0])
     expect(manager.attachCommand).toHaveBeenCalledTimes(2)
     expect(result.metadata).toMatchObject({ total: 2, tasks: [{ attachCommand: cmd }, { attachCommand: cmd }], pruned: [{ id: "lost" }] })
+  })
+})
+
+describe("mux_clean_history", () => {
+  it("默认只预览当前项目，返回可原样提交的候选标识", async () => {
+    const { manager, call } = harness()
+    const candidate = { id: "build-1", updatedAt: "2026-01-01T00:00:00.000Z", restartCount: 2 }
+    manager.previewHistory.mockResolvedValue([task({ ...candidate, status: "succeeded", shell: true })])
+    const result = await call("mux_clean_history")
+    expect(manager.previewHistory).toHaveBeenCalledWith({ cwd: project })
+    expect(manager.cleanHistory).not.toHaveBeenCalled()
+    expect(manager.pruneGone).not.toHaveBeenCalled()
+    expect(result.metadata).toMatchObject({
+      ok: true, cwd: project, candidates: [candidate], tasks: [{ ...candidate, status: "succeeded", shell: true }],
+    })
+    expect(result.content[0].text).toContain("未执行清理")
+    expect(result.content[0].text).toContain("含驻留 shell")
+  })
+
+  it("显式提交候选项和范围，报告部分成功且不重新预览", async () => {
+    const { manager, call } = harness()
+    const candidates = [{ id: "build-1", updatedAt: "2026-01-01T00:00:00.000Z", restartCount: 0 }]
+    const outcome = { removed: ["build-1"], skipped: ["stale"], failed: [{ id: "blocked", message: "permission denied" }] }
+    manager.cleanHistory.mockResolvedValueOnce(outcome)
+    const result = await call("mux_clean_history", { cwd: "sub", includeShell: true, retentionDays: 0, candidates })
+    expect(manager.cleanHistory).toHaveBeenCalledWith({ cwd: resolve(project, "sub"), includeShell: true, retentionDays: 0, candidates })
+    expect(manager.previewHistory).not.toHaveBeenCalled()
+    expect(manager.closeSession).not.toHaveBeenCalled()
+    expect(result.metadata).toEqual({ ok: false, cwd: resolve(project, "sub"), ...outcome })
+    expect(result.content[0].text).toContain("permission denied")
   })
 })

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { basename, resolve } from "node:path"
 import { buildAttachCommand, createCommandRunner, detectMuxBackend, supportsPosixMuxFeatures } from "./backend"
+import { resolveMuxConfig, validateTmuxBackendConfig } from "./config"
 import { MuxError } from "./errors"
 import { withStateLock } from "./lock"
 import { createMuxState, isSafeTaskId } from "./state"
@@ -59,16 +60,21 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
   const state = createMuxState(options.stateDir)
   const polling = duration(options.pollIntervalMs ?? 100, "pollIntervalMs", 1)
   let backendPromise: Promise<MuxBackend> | undefined
-  function getBackend(): Promise<MuxBackend> {
-    if (options.backend) return Promise.resolve({
-      ...options.backend,
-      platform: options.platform ?? options.backend.platform,
-      socketName: options.socketName ?? options.backend.socketName,
-    })
-    return backendPromise ??= detectMuxBackend({ ...options, runner }).then((backend) => {
-      if (!backend) throw new MuxError("BACKEND_UNAVAILABLE", "No tmux or psmux executable found")
+  async function detectBackend(): Promise<MuxBackend> {
+    const config = await resolveMuxConfig(options)
+    if (options.backend) {
+      const backend = { ...options.backend, ...config, platform: options.platform ?? options.backend.platform }
+      await validateTmuxBackendConfig(backend)
       return backend
-    }).catch((error) => {
+    }
+    const backend = await detectMuxBackend({ ...options, ...config, runner })
+    if (!backend) throw new MuxError("BACKEND_UNAVAILABLE", config.tmuxConfig === undefined
+      ? "No tmux or psmux executable found"
+      : "tmux executable required by the configured tmux.conf")
+    return backend
+  }
+  function getBackend(): Promise<MuxBackend> {
+    return backendPromise ??= detectBackend().catch((error) => {
       backendPromise = undefined
       throw error
     })
@@ -76,7 +82,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
   const client = async () => {
     const backend = await getBackend()
     return createMuxClient(backend, runner, {
-      byobuKeys: options.byobuKeys ?? true,
+      byobuKeys: options.byobuKeys ?? (backend.tmuxConfig === undefined),
       statusTheme: options.statusTheme,
       prepareExitFile: options.keepShellOnExit !== false && supportsPosixMuxFeatures(backend) ? state.prepareExitFile : undefined,
     })
@@ -377,6 +383,91 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     await state.deleteTask(task.id)
   }
 
+  function historyFilter({ cwd, includeShell, retentionDays = 7 }: HistoryOptions) {
+    const project = resolve(cwd)
+    const retentionMs = duration(retentionDays, "retentionDays") * 86_400_000
+    return {
+      project,
+      eligible: (task: ManagedTask) => task.cwd === project && task.status !== "running"
+        && (!task.shell || includeShell === true)
+        && (task.status === "gone" || Date.parse(task.updatedAt) <= Date.now() - retentionMs),
+    }
+  }
+
+  async function historySnapshot(
+    backend: MuxBackend, project: string, previous: ManagedTask | undefined, panes: LivePaneInfo[],
+  ) {
+    if (previous && previous.cwd !== project) return
+    const [pane] = panes
+    // 不清理被移动到别的会话、身份不明或在多个会话中链接的 pane。
+    if (pane && (panes.length !== 1 || !pane.managed || !pane.role || pane.command === undefined || pane.cwd !== project
+      || pane.sessionName !== projectMuxSession(project)
+      || (previous && (pane.paneId !== previous.paneId || pane.sessionName !== previous.muxSession
+        || pane.role !== previous.role || (pane.taskName ?? pane.windowName) !== previous.name
+        || pane.command !== previous.command || pane.sessionId !== previous.sessionId)))) return
+    const task = await taskSnapshot(backend, previous, panes)
+    return task && { task, pane }
+  }
+
+  function previewHistory(options: HistoryOptions): Promise<ManagedTask[]> {
+    return locked(async () => {
+      const { project, eligible } = historyFilter(options)
+      const backend = await getBackend()
+      const [stored, panes] = await Promise.all([state.listTasks(), (await client()).listPanes()])
+      const byId = new Map(stored.map((task) => [task.id, task]))
+      const panesById = new Map<string, LivePaneInfo[]>()
+      for (const pane of panes) {
+        if (!pane.taskId || !isSafeTaskId(pane.taskId)) continue
+        const group = panesById.get(pane.taskId) ?? []
+        group.push(pane)
+        panesById.set(pane.taskId, group)
+      }
+      const result: ManagedTask[] = []
+      for (const id of new Set([...byId.keys(), ...panesById.keys()])) {
+        const previous = byId.get(id)
+        const current = await historySnapshot(backend, project, previous, panesById.get(id) ?? [])
+        if (!current) continue
+        await writeReconciled(current.task, previous)
+        if (eligible(current.task)) result.push(current.task)
+      }
+      return result
+    })
+  }
+
+  function cleanHistory({ candidates, ...options }: CleanHistoryOptions): Promise<CleanHistoryResult> {
+    return locked(async () => {
+      const { project, eligible } = historyFilter(options)
+      const result: CleanHistoryResult = { removed: [], skipped: [], failed: [] }
+      const seen = new Set<string>()
+      for (const { id, updatedAt, restartCount } of candidates) {
+        if (seen.has(id)) continue
+        seen.add(id)
+        try {
+          const previous = isSafeTaskId(id) ? await state.readTask(id) : undefined
+          if (!previous || !eligible(previous) || previous.updatedAt !== updatedAt || previous.restartCount !== restartCount) {
+            result.skipped.push(id)
+            continue
+          }
+          const backend = await getBackend()
+          const mux = await client()
+          const panes = (await mux.listPanes()).filter((pane) => pane.taskId === id)
+          const current = await historySnapshot(backend, project, previous, panes)
+          // 不接受新的终态、重新出现的 pane 或其他未在预览中确认的变化。
+          if (!current || JSON.stringify(current.task) !== JSON.stringify(previous)) {
+            result.skipped.push(id)
+            continue
+          }
+          if (current.pane) await mux.killPane(current.pane.paneId)
+          await deleteTaskState(previous)
+          result.removed.push(id)
+        } catch (error) {
+          result.failed.push({ id, message: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      return result
+    })
+  }
+
   async function remove(task: ManagedTask): Promise<ServiceActionResult> {
     const mux = await client()
     if ((await mux.listPanes()).some((pane) => pane.paneId === task.paneId && pane.managed && pane.taskId === task.id)) {
@@ -455,6 +546,8 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     stopTask,
     removeTask,
     closeSession,
+    previewHistory,
+    cleanHistory,
     captureLogs: async (id: string, lines?: number) => {
       const task = await observe(id)
       if (!task || task.status === "gone" || task.forceStopped) throw noLivePane(id)
@@ -479,6 +572,24 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     }),
     attachCommand: async (task: Pick<ManagedTask, "muxSession">) => buildAttachCommand(await getBackend(), task.muxSession),
   }
+}
+
+export interface HistoryOptions {
+  cwd: string
+  includeShell?: boolean
+  retentionDays?: number
+}
+
+export type HistoryCandidate = Pick<ManagedTask, "id" | "updatedAt" | "restartCount">
+
+export interface CleanHistoryOptions extends HistoryOptions {
+  candidates: HistoryCandidate[]
+}
+
+export interface CleanHistoryResult {
+  removed: string[]
+  skipped: string[]
+  failed: { id: string; message: string }[]
 }
 
 export type MuxManager = ReturnType<typeof createMuxManager>

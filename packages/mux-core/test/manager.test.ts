@@ -19,6 +19,7 @@ function fakeMux() {
   let serial = 0
   let pid = 100
   let listError: string | undefined
+  const killErrors = new Map<string, string>()
   let ignoreInterrupt = false
   let cancelledWaits = 0
   const result = (stdout = "", exitCode = 0, stderr = ""): CommandResult => ({ exitCode, stdout, stderr })
@@ -74,7 +75,12 @@ function fakeMux() {
           pane.fields.pane_dead_status = "130"
         }
         return result()
-      case "kill-pane": panes.delete(target); return result()
+      case "kill-pane": {
+        const error = killErrors.get(target)
+        if (error) return result("", 1, error)
+        panes.delete(target)
+        return result()
+      }
       case "kill-session": {
         const name = target.slice(1)
         const ids = [...panes.keys()].filter((id) => panes.get(id)?.fields.session_name === name)
@@ -90,7 +96,7 @@ function fakeMux() {
     }
   }
   return {
-    calls, runner, panes, listError: (error?: string) => { listError = error },
+    calls, runner, panes, killErrors, listError: (error?: string) => { listError = error },
     ignoreInterrupt: () => { ignoreInterrupt = true },
     get cancelledWaits() { return cancelledWaits },
   }
@@ -120,6 +126,110 @@ describe("mux manager", () => {
     await writeFile(marker, "1\n")
     return marker
   }
+
+  async function historyTask(name: string, { cwd = identity.cwd, command = "exit 0", ageDays = 8 } = {}) {
+    const { task } = await manager.runBuild({ cwd, name, command, wait: false })
+    const aged = { ...task, updatedAt: new Date(Date.now() - ageDays * 86_400_000).toISOString() }
+    await createMuxState().writeTask(aged)
+    return aged
+  }
+
+  it("预览和确认仅清理项目内已过期的终态及无 pane 的记录", async () => {
+    const old = await historyTask("old")
+    const recent = await historyTask("recent", { ageDays: 6 })
+    const running = await historyTask("running", { command: "sleep 60" })
+    const other = await historyTask("other", { cwd: join(dir, "other-project") })
+    const gone = await historyTask("gone", { ageDays: 0 })
+    // 原 pane ID 现在属于手工 pane，而非预览对象。
+    const manual = fake.panes.get(gone.paneId)!
+    for (const key of Object.keys(manual.fields)) {
+      if (key.startsWith("@opencode_mux_")) delete manual.fields[key]
+    }
+    const marker = await writeExitMarker(gone)
+    const options = { cwd: identity.cwd }
+    const candidates = await manager.previewHistory(options)
+    expect(candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: gone.id, status: "gone" }),
+      expect.objectContaining({ id: old.id, status: "succeeded", updatedAt: old.updatedAt }),
+    ]))
+    expect(candidates).toHaveLength(2)
+    expect(await manager.previewHistory(options)).toEqual(candidates)
+    expect(fake.calls.some((call) => call.includes("kill-pane"))).toBe(false)
+    expect(await readFile(marker, "utf8")).toBe("1\n")
+    expect((await manager.previewHistory({ ...options, retentionDays: 0 })).map(({ id }) => id)).toContain(recent.id)
+
+    expect(await manager.cleanHistory({ ...options, candidates })).toEqual({
+      removed: candidates.map(({ id }) => id), skipped: [], failed: [],
+    })
+    expect(fake.calls.filter((call) => call.includes("kill-pane"))).toEqual([["tmux", "kill-pane", "-t", old.paneId]])
+    expect(fake.calls.some((call) => call.includes("kill-session"))).toBe(false)
+    expect([...fake.panes.keys()]).toEqual([recent.paneId, running.paneId, other.paneId, gone.paneId])
+    expect((await createMuxState().listTasks()).map(({ id }) => id).sort()).toEqual([recent.id, running.id, other.id].sort())
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("驻留 shell 只有在预览和实际清理均显式允许时才会关闭", async () => {
+    const original = await historyTask("shell", { command: "sleep 60" })
+    const marker = await writeExitMarker(original)
+    const [shell] = await manager.listTasks({ cwd: identity.cwd })
+    const candidate = { ...shell, updatedAt: original.updatedAt }
+    await createMuxState().writeTask(candidate)
+    const options = { cwd: identity.cwd }
+    expect(await manager.previewHistory(options)).toEqual([])
+    const candidates = await manager.previewHistory({ ...options, includeShell: true })
+    expect(candidates).toEqual([expect.objectContaining({ id: shell.id, status: "failed", shell: true })])
+    expect(await manager.cleanHistory({ ...options, candidates })).toEqual({
+      removed: [], skipped: [shell.id], failed: [],
+    })
+    expect(fake.panes.has(shell.paneId)).toBe(true)
+    expect(await manager.cleanHistory({ ...options, candidates, includeShell: true })).toEqual({
+      removed: [shell.id], skipped: [], failed: [],
+    })
+    expect(fake.panes.has(shell.paneId)).toBe(false)
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("确认时跳过已经重启、移动、身份被替换或证据不符的任务", async () => {
+    const restarted = await historyTask("restarted")
+    const moved = await historyTask("moved")
+    const reused = await historyTask("reused")
+    const revived = await historyTask("revived")
+    const ambiguous = await historyTask("ambiguous")
+    const changed = await historyTask("changed")
+    const movedProject = await historyTask("moved-project")
+    const options = { cwd: identity.cwd, retentionDays: 0 }
+    const candidates = await manager.previewHistory(options)
+    expect(candidates).toHaveLength(7)
+    await manager.restartTask(restarted.id, { command: "exit 42" })
+    fake.panes.get(moved.paneId)!.fields.session_name = projectMuxSession(join(dir, "moved"))
+    fake.panes.get(reused.paneId)!.fields["@opencode_mux_id"] = "manually-replaced"
+    Object.assign(fake.panes.get(revived.paneId)!.fields, { pane_dead: "0", pane_pid: "9900" })
+    const linked = fake.panes.get(ambiguous.paneId)!
+    fake.panes.set("%777", { ...linked, fields: { ...linked.fields, pane_id: "%777" } })
+    fake.panes.get(changed.paneId)!.fields.pane_dead_status = "42"
+    const state = createMuxState()
+    await state.writeTask({ ...movedProject, cwd: join(dir, "moved-project") })
+
+    expect(await manager.cleanHistory({ ...options, candidates })).toEqual({
+      removed: [], skipped: candidates.map(({ id }) => id), failed: [],
+    })
+    expect(await state.listTasks()).toHaveLength(7)
+    expect(fake.calls.some((call) => call.includes("kill-pane"))).toBe(false)
+  })
+
+  it("单项清理失败后继续处理后续候选；重复候选只尝试一次", async () => {
+    const blocked = await historyTask("blocked")
+    const removable = await historyTask("removable")
+    const options = { cwd: identity.cwd }
+    await manager.previewHistory(options)
+    fake.killErrors.set(blocked.paneId, "permission denied")
+    expect(await manager.cleanHistory({ ...options, candidates: [blocked, blocked, removable] })).toEqual({
+      removed: [removable.id], skipped: [], failed: [{ id: blocked.id, message: expect.stringContaining("permission denied") }],
+    })
+    expect(fake.panes.has(blocked.paneId)).toBe(true)
+    expect(await createMuxState().readTask(blocked.id)).toEqual(blocked)
+    expect(await createMuxState().readTask(removable.id)).toBeUndefined()
+  })
 
   it("保留后端探测的 null 契约，由管理器返回错误码", async () => {
     const runner: CommandRunner = async () => ({ exitCode: 1, stdout: "", stderr: "" })

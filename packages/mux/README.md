@@ -49,6 +49,7 @@ OpenCode V2 插件：在独立的 tmux/psmux pane 中运行构建、测试和后
 | `mux_logs` | 读取最近的日志，默认 `100` 行，可用 `lines` 覆盖。 |
 | `mux_input` | 向仍活着的 pane 发送文本，包括驻留的 shell。默认追加回车；`enter: false` 只发送文本。 |
 | `mux_remove` | 移除单个构建或服务。设 `session: true` 可关闭整个项目会话。 |
+| `mux_clean_history` | 预览或清理指定项目的历史任务，默认使用当前项目，只移除确认的任务。 |
 | `mux_list` | 默认只列出当前项目的任务。用 `all: true` 查看所有项目，或用 `cwd`、`role`、`status` 筛选。`pruneGone: true` 会先清理目录和角色范围内已丢失 pane 的记录，不受 `status` 筛选影响。 |
 
 运行构建和管理服务时，省略 `cwd` 使用当前项目目录。对于重启、日志和输入，`id` 最准确；仅提供 `name` 时会搜索所有目录，出现同名任务时会列出候选项，可追加 `role`、`cwd` 或改用 `id`。
@@ -57,6 +58,28 @@ OpenCode V2 插件：在独立的 tmux/psmux pane 中运行构建、测试和后
 
 - `mux_remove({ id: "<任务 ID>" })`：只移除指定的构建或服务；若 pane 已不存在，仍会清理任务记录。也可用 `name` 配合 `role`、`cwd` 定位。
 - `mux_remove({ session: true, cwd: "." })`：关闭当前项目的整个会话，终止会话中的所有任务、断开已附加的终端，并清理该会话的全部任务记录。省略 `cwd` 时也使用当前项目。
+
+### 清理历史
+
+先用 `mux_clean_history({})` 预览，再传入预览给出的 `candidates` 确认，预览与确认须使用相同的 `cwd`、`retentionDays` 和 `includeShell`。清理已失去 pane 的记录，以及已记录为结束并超过保留期的任务（默认 7 天）。运行中的任务和手工打开的非受管 pane 不受影响。
+
+默认保留驻留 shell。只有确认不再需要里面的交互现场时，才以 `includeShell: true` 重新预览和确认。预览后重启或状态变化的任务会跳过；删除的历史任务不能再用 Mux 查看日志或重启。如果清除了一个 tmux 会话的最后一个 pane，tmux 会自动结束该空会话。
+
+## 使用自定义 tmux 配置
+
+在运行 Mux 的主机上，在该系统用户的主目录下创建 `~/.config/opencode/opencode-mux.json`：
+
+```json
+{
+  "socketName": "opencode-themed"
+}
+```
+
+默认读取同目录的 `tmux.conf`。可选的 `tmuxConfig` 如为相对路径（例如 `themes/mux.conf`），也以 `~/.config/opencode/` 为基准；绝对路径则直接使用。该文件必须是可读的原生 tmux 配置，`socketName` 必须是专用的非默认名称。只加载你信任的文件：tmux 配置可以执行命令。没有 `opencode-mux.json` 就不会启用这项配置；Mux 不从项目目录查找配置，不使用 `HOME` 或 `XDG_CONFIG_HOME` 覆盖查找位置，也不运行 Byobu 启动器。
+
+OpenCode 和 OpenChamber 在同一主机、同一用户、同一状态目录下读取这份配置并共享任务。启用后，重新启动 OpenCode 和 OpenChamber 扩展服务以读取设置。新 socket 看不到旧 socket 的任务，但不会迁移或关闭它们。配置只在该 socket 的 **tmux 服务启动**时加载；修改文件不会重载现有服务。重新启动 OpenCode 或 OpenChamber 本身也不会重启 tmux。
+
+使用自定义配置时默认保留其中的状态栏和按键；要继续用 F6 脱离，可在自己的配置中加 `bind-key -n F6 detach-client`。未启用自定义配置时，原有 Mux 主题和 F6 不变。
 
 ## 接手与排查
 

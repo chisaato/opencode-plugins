@@ -1,7 +1,7 @@
 import { resolve } from "node:path"
 import type {
-  ManagedTask, MuxManager, RunBuildOptions, ServiceActionOptions, ServiceActionResult,
-  TaskFilter, TaskRole, TaskStatus,
+  HistoryCandidate, HistoryOptions, ManagedTask, MuxManager, RunBuildOptions,
+  ServiceActionOptions, ServiceActionResult, TaskFilter, TaskRole, TaskStatus,
 } from "@misakacloud/opencode-mux-core"
 
 export const MAX_MUX_INTEGER = 2_147_483_647
@@ -16,12 +16,13 @@ export interface MuxToolDefaults {
 
 type ToolManager = Pick<MuxManager,
   "runBuild" | "serviceAction" | "restartTask" | "removeTask" | "closeSession" | "captureLogs" | "sendInput"
-  | "listTasks" | "pruneGone" | "attachCommand">
+  | "listTasks" | "pruneGone" | "attachCommand" | "previewHistory" | "cleanHistory">
 type ToolContext = { sessionID?: string }
 type Selector = { id?: string; name?: string; role?: TaskRole; cwd?: string }
 type BuildInput = Omit<RunBuildOptions, "cwd" | "source" | "sessionId"> & { cwd?: string }
 type ServiceInput = Omit<ServiceActionOptions, "cwd" | "source" | "sessionId"> & { cwd?: string; tailLines?: number }
 type ListInput = { cwd?: string; all?: boolean; role?: TaskRole; status?: TaskStatus; pruneGone?: boolean }
+type HistoryInput = Omit<HistoryOptions, "cwd"> & { cwd?: string; candidates?: HistoryCandidate[] }
 
 const str = (description: string) => ({ type: "string", description })
 const bool = (description: string) => ({ type: "boolean", description })
@@ -215,6 +216,40 @@ export function createMuxTools(manager: ToolManager, projectDirectory: string, d
           `任务范围：${filter.cwd ?? "所有项目"}；共 ${tasks.length} 个任务${pruneGone ? `，清理 ${pruned.length} 条记录` : ""}。`,
           ...tasks.map(taskText),
         ].join("\n"), { ok: true, cwd: filter.cwd ?? null, total: tasks.length, tasks, pruned: pruned.map(taskSummary) })
+      }),
+    tool<HistoryInput>("mux_clean_history", "预览或确认清理指定项目的受管任务历史。仅在显式传入预览返回的候选项时才清理；不关闭整个会话。",
+      schema({
+        cwd,
+        includeShell: bool("是否允许清理已过保留期但仍有驻留 shell 的任务；默认 false。"),
+        retentionDays: integer("保留已结束任务的天数；默认 7。已丢失 pane 的记录不受保留期限制。"),
+        candidates: {
+          type: "array",
+          description: "省略则仅预览。确认时传入已审核的候选项，沿用预览的 cwd、includeShell 和 retentionDays。",
+          items: schema({
+            id: str("预览中的任务 ID。"),
+            updatedAt: str("预览中的任务更新时间，原样回传。"),
+            restartCount: integer("预览中的任务重启次数，原样回传。"),
+          }, ["id", "updatedAt", "restartCount"]),
+        },
+      }),
+      async ({ cwd, includeShell, retentionDays, candidates }) => {
+        const options = { cwd: workingDirectory(cwd), includeShell, retentionDays }
+        if (candidates !== undefined) {
+          const result = await manager.cleanHistory({ ...options, candidates })
+          return report([
+            `任务范围：${options.cwd}；已清理 ${result.removed.length} 项，跳过 ${result.skipped.length} 项，失败 ${result.failed.length} 项。`,
+            ...result.skipped.map((id) => `跳过 ${id}`),
+            ...result.failed.map(({ id, message }) => `失败 ${id}：${message}`),
+          ].join("\n"), { ok: result.failed.length === 0, cwd: options.cwd, ...result })
+        }
+        const tasks = (await manager.previewHistory(options)).map((task) => ({ ...taskSummary(task), updatedAt: task.updatedAt }))
+        const preview = tasks.map(({ id, updatedAt, restartCount }) => ({ id, updatedAt, restartCount }))
+        return report([
+          `任务范围：${options.cwd}；预览 ${tasks.length} 项，未执行清理。`,
+          ...tasks.map((task, index) =>
+            `[${task.status}] ${task.role} ${task.name}${task.shell ? "（含驻留 shell）" : ""} ${JSON.stringify(preview[index])}`),
+          "确认清理时，传入已审核的 candidates 并沿用本次选项。",
+        ].join("\n"), { ok: true, cwd: options.cwd, tasks, candidates: preview })
       }),
   ]
 }
