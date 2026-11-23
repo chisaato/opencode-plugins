@@ -865,6 +865,7 @@ if (root) {
       if (!currentDirectory) {
         tasks = []
         initialLoading = false
+        refreshing = false
         render()
         return
       }
@@ -922,7 +923,7 @@ if (root) {
     initialLoading = Boolean(normalized)
     lastError = null
     render()
-    if (shouldTrigger) void poller.triggerNow()
+    if (shouldTrigger) void poller.triggerNow({ invalidate: true })
   }
 
   let started = false

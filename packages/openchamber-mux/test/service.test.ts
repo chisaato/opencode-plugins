@@ -1,6 +1,6 @@
 import { once } from "node:events"
 import { request } from "node:http"
-import { MuxCommandError, type ManagedTask, type MuxManager } from "@misakacloud/opencode-mux-core"
+import { MuxCommandError, MuxError, type ManagedTask, type MuxManager } from "@misakacloud/opencode-mux-core"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createServiceServer } from "../service/app"
 
@@ -78,7 +78,7 @@ describe("OpenChamber Mux HTTP service", () => {
   })
 
   it("keeps the service ready and lists no tasks if neither backend is installed", async () => {
-    manager.getBackend.mockRejectedValue(new Error("No tmux or psmux executable found"))
+    manager.getBackend.mockRejectedValue(new MuxError("BACKEND_UNAVAILABLE", "Backend binary missing"))
     expect(await call("/health")).toEqual({ status: 200, body: { ok: true, backend: null } })
     expect(await call("/tasks")).toEqual({ status: 200, body: { tasks: [], backend: null } })
     expect(manager.listTasks).not.toHaveBeenCalled()
@@ -102,6 +102,14 @@ describe("OpenChamber Mux HTTP service", () => {
   })
 
   const build = { name: task.name, cwd: task.cwd, command: task.command }
+
+  it("returns 503 with the backend error code for mutations", async () => {
+    const error = new MuxError("BACKEND_UNAVAILABLE", "No tmux or psmux executable found")
+    manager.runBuild.mockRejectedValueOnce(error)
+    expect(await post("/builds", build)).toEqual({
+      status: 503, body: { error: error.message, code: "BACKEND_UNAVAILABLE" },
+    })
+  })
 
   it("starts builds asynchronously by default and does not trust a supplied source", async () => {
     expect(await post("/builds", { ...build, source: "ai" }))
@@ -166,28 +174,25 @@ describe("OpenChamber Mux HTTP service", () => {
     expect(manager.sendInput.mock.calls).toEqual([[task.id, "  text;  ", { enter: false }], [task.id, "", { enter: true }]])
   })
 
-  it("returns 409 when sending input to an existing non-running task", async () => {
-    manager.sendInput.mockRejectedValueOnce(new Error(`Mux task ${task.id} is not running`))
-    expect(await post(`/tasks/${task.id}/input`, { input: "x" })).toEqual({ status: 409, body: { error: "Task is not running" } })
-  })
-
   it("returns 404 for missing tasks and panes, including a pane disappearing during log capture", async () => {
     const id = "not-found"
     const missing = { status: 404, body: { error: "Task not found" } }
+    const missingPane = { status: 404, body: { error: "Task not found", code: "TASK_NO_LIVE_PANE" } }
     manager.restartTask.mockResolvedValueOnce({ ok: false })
     manager.stopTask.mockResolvedValueOnce({ ok: false })
     manager.removeTask.mockResolvedValueOnce({ ok: false })
-    manager.sendInput.mockRejectedValueOnce(new Error(`Mux task ${id} has no live pane`))
-    manager.captureLogs.mockRejectedValueOnce(new Error(`Mux task ${id} has no live pane`))
+    const error = new MuxError("TASK_NO_LIVE_PANE", "The target pane is unavailable")
+    manager.sendInput.mockRejectedValueOnce(error)
+    manager.captureLogs.mockRejectedValueOnce(error)
     expect(await post(`/tasks/${id}/restart`)).toEqual(missing)
     expect(await post(`/tasks/${id}/stop`)).toEqual(missing)
     expect(await call(`/tasks/${id}`, { method: "DELETE" })).toEqual(missing)
-    expect(await post(`/tasks/${id}/input`, { input: "x" })).toEqual(missing)
-    expect(await call(`/tasks/${id}/logs`)).toEqual(missing)
+    expect(await post(`/tasks/${id}/input`, { input: "x" })).toEqual(missingPane)
+    expect(await call(`/tasks/${id}/logs`)).toEqual(missingPane)
     manager.captureLogs.mockRejectedValueOnce(new MuxCommandError("capture-pane", {
       exitCode: 1, stdout: "", stderr: "can't find pane: %1",
     }))
-    expect(await call(`/tasks/${task.id}/logs`)).toEqual(missing)
+    expect(await call(`/tasks/${task.id}/logs`)).toEqual(missingPane)
     manager.listTasks.mockResolvedValueOnce([])
     expect(await call(`/tasks/${task.id}/logs`)).toEqual(missing)
   })
@@ -216,9 +221,10 @@ describe("OpenChamber Mux HTTP service", () => {
   })
 
   it("returns 400 when starting a new service without the required command", async () => {
-    manager.serviceAction.mockRejectedValueOnce(new Error("A command is required for a new service"))
+    const error = new MuxError("COMMAND_REQUIRED", "No launch command supplied")
+    manager.serviceAction.mockRejectedValueOnce(error)
     expect(await post("/services", { action: "start", name: "watch", cwd: task.cwd }))
-      .toEqual({ status: 400, body: { error: "A command is required for a new service" } })
+      .toEqual({ status: 400, body: { error: error.message, code: "COMMAND_REQUIRED" } })
   })
 
   it("limits both fixed-length and chunked bodies by bytes", async () => {

@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type RequestListener, type ServerResponse } from "node:http"
-import { isSafeTaskId, MuxCommandError, type ManagedTask, type MuxManager } from "@misakacloud/opencode-mux-core"
+import { isSafeTaskId, MuxCommandError, MuxError, type ManagedTask, type MuxErrorCode, type MuxManager } from "@misakacloud/opencode-mux-core"
 import type {
   ErrorResponse, HealthResponse, InputBody, LogsResponse, PruneBody, PruneResponse,
   RestartTaskBody, RunBuildBody, RunBuildHttpResponse, ServiceActionBody,
@@ -9,7 +9,12 @@ import type {
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_INTEGER = 2_147_483_647
 const MAX_BUILD_WAIT_MS = 15_000
-const MISSING_BACKEND = "No tmux or psmux executable found"
+const TASK_NOT_FOUND = "Task not found"
+const MUX_ERROR_STATUS: Partial<Record<MuxErrorCode, number>> = {
+  BACKEND_UNAVAILABLE: 503,
+  COMMAND_REQUIRED: 400,
+  TASK_NO_LIVE_PANE: 404,
+}
 const ROLES = ["build", "service"] as const
 const STATUSES = ["running", "succeeded", "failed", "stopped", "gone"] as const
 const ACTIONS = ["start", "restart", "stop", "status", "remove"] as const
@@ -88,13 +93,18 @@ function oneOf<T extends string>(value: unknown, field: string, values: readonly
 }
 
 function taskNotFound(): HttpError {
-  return new HttpError(404, "Task not found")
+  return new HttpError(404, TASK_NOT_FOUND)
 }
 
-function missingPane(error: unknown, id: string): boolean {
-  return error instanceof Error && (error.message === `Mux task ${id} has no live pane`
-    || (error instanceof MuxCommandError && ["capture-pane", "send-keys"].includes(error.subcommand)
-      && /can't find pane|no such pane|pane not found|no server running|no sessions|no such file or directory/i.test(error.result.stderr)))
+async function withPane<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (error instanceof MuxCommandError && error.isMissingPane) {
+      throw new MuxError("TASK_NO_LIVE_PANE", error.message, { cause: error })
+    }
+    throw error
+  }
 }
 
 export function createServiceHandler({ manager, token }: ServiceOptions): RequestListener {
@@ -103,7 +113,7 @@ export function createServiceHandler({ manager, token }: ServiceOptions): Reques
     try {
       return await manager.getBackend()
     } catch (error) {
-      if (error instanceof Error && error.message === MISSING_BACKEND) return null
+      if (error instanceof MuxError && error.code === "BACKEND_UNAVAILABLE") return null
       throw error
     }
   }
@@ -209,13 +219,7 @@ export function createServiceHandler({ manager, token }: ServiceOptions): Reques
         const value = searchParams.get("lines") ?? "120"
         if (!/^\d+$/.test(value)) throw new HttpError(400, "Invalid lines")
         const lines = optionalInteger(Number(value), "lines")
-        let tail: string
-        try {
-          tail = await manager.captureLogs(id, lines)
-        } catch (error) {
-          if (missingPane(error, id)) throw taskNotFound()
-          throw error
-        }
+        const tail = await withPane(() => manager.captureLogs(id, lines))
         const task = (await manager.listTasks()).find((item) => item.id === id)
         if (!task || task.status === "gone" || task.forceStopped) throw taskNotFound()
         const { status, exitCode, attachCommand } = await view(task)
@@ -224,15 +228,7 @@ export function createServiceHandler({ manager, token }: ServiceOptions): Reques
       if (method === "POST" && operation === "input") {
         const body = await readBody(request)
         const input: InputBody = { input: text(body.input, "input", true), enter: optionalBoolean(body.enter, "enter") }
-        try {
-          await manager.sendInput(id, input.input, { enter: input.enter })
-        } catch (error) {
-          if (error instanceof Error && error.message === `Mux task ${id} is not running`) {
-            throw new HttpError(409, "Task is not running")
-          }
-          if (missingPane(error, id)) throw taskNotFound()
-          throw error
-        }
+        await withPane(() => manager.sendInput(id, input.input, { enter: input.enter }))
         return { ok: true }
       }
     }
@@ -246,14 +242,16 @@ export function createServiceHandler({ manager, token }: ServiceOptions): Reques
       if (response.destroyed || response.headersSent) return
       if (error instanceof HttpError) {
         respond(response, error.status, { error: error.message } satisfies ErrorResponse)
-      } else if (error instanceof Error && error.message === MISSING_BACKEND) {
-        respond(response, 503, { error: MISSING_BACKEND } satisfies ErrorResponse)
-      } else if (error instanceof Error && error.message === "A command is required for a new service") {
-        respond(response, 400, { error: error.message } satisfies ErrorResponse)
-      } else {
-        console.error("Mux service request failed", error)
-        respond(response, 500, { error: "Internal server error" } satisfies ErrorResponse)
+        return
       }
+      const status = error instanceof MuxError ? MUX_ERROR_STATUS[error.code] : undefined
+      if (error instanceof MuxError && status !== undefined) {
+        const message = error.code === "TASK_NO_LIVE_PANE" ? TASK_NOT_FOUND : error.message
+        respond(response, status, { error: message, code: error.code } satisfies ErrorResponse & { code: MuxErrorCode })
+        return
+      }
+      console.error("Mux service request failed", error)
+      respond(response, 500, { error: "Internal server error" } satisfies ErrorResponse)
     })
   }
 }

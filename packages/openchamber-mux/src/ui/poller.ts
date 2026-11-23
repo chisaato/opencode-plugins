@@ -6,7 +6,7 @@ export interface PollerOptions {
 
 export interface Poller {
   start: () => void
-  triggerNow: () => Promise<void>
+  triggerNow: (options?: { invalidate?: boolean }) => Promise<void>
   dispose: () => void
 }
 
@@ -20,7 +20,7 @@ export function createPoller(options: PollerOptions): Poller {
   let timer: ReturnType<typeof setTimeout> | null = null
   let seq = 0
   let inFlight: Promise<void> | null = null
-  let pendingTrigger = false
+  let queued: { explicit: boolean; promise: Promise<void> } | null = null
 
   function clearTimer(): void {
     if (timer !== null) {
@@ -38,32 +38,30 @@ export function createPoller(options: PollerOptions): Poller {
     }, delay)
   }
 
-  async function tick(): Promise<void> {
-    if (disposed) return
+  async function tick(explicit = false): Promise<void> {
+    if (disposed || (!explicit && document.visibilityState === "hidden")) return
+    if (queued) {
+      queued.explicit ||= explicit
+      return queued.promise
+    }
     if (inFlight) {
-      pendingTrigger = true
-      await inFlight
-      return
+      // 并发触发共享下一次刷新，等待的是该刷新而非正在执行的请求。
+      const runQueued = (): Promise<void> => {
+        queued = null
+        return tick(next.explicit)
+      }
+      const next = { explicit, promise: inFlight.then(runQueued, runQueued) }
+      queued = next
+      return next.promise
     }
     clearTimer()
-    const currentSeq = ++seq
+    const currentSeq = seq
     const stale = () => disposed || currentSeq !== seq
-    const runPromise = options.run({ stale }).finally(() => {
-      if (inFlight === runPromise) inFlight = null
+    inFlight = options.run({ stale }).finally(() => {
+      inFlight = null
+      if (!queued) scheduleNext()
     })
-    inFlight = runPromise
-    try {
-      await runPromise
-    } finally {
-      if (!disposed) {
-        if (pendingTrigger) {
-          pendingTrigger = false
-          void tick()
-        } else {
-          scheduleNext()
-        }
-      }
-    }
+    return inFlight
   }
 
   const onVisibilityChange = () => {
@@ -83,10 +81,13 @@ export function createPoller(options: PollerOptions): Poller {
       if (disposed) return
       void tick()
     },
-    triggerNow: () => tick(),
+    triggerNow: ({ invalidate = false } = {}) => {
+      // 仅查询范围等变化会废弃在途结果；普通刷新仍可提交。
+      if (invalidate) seq += 1
+      return tick(true)
+    },
     dispose: () => {
       disposed = true
-      seq += 1
       clearTimer()
       document.removeEventListener("visibilitychange", onVisibilityChange)
     },

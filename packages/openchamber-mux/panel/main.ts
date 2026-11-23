@@ -642,16 +642,6 @@ ${MUX_SHARED_CSS}
 type ScopeMode = "project" | "all"
 type RoleFilter = "all" | TaskRole
 
-interface CloseSessionBody {
-  cwd: string
-}
-
-interface CloseSessionResponse {
-  ok: boolean
-  removed: number
-  sessionName: string
-}
-
 interface SessionGroup {
   muxSession: string
   cwd: string
@@ -1310,13 +1300,13 @@ if (root) {
     if (scope === "project") return
     scope = "project"
     render()
-    void poller.triggerNow()
+    void poller.triggerNow({ invalidate: true })
   })
   scopeAllBtn.addEventListener("click", () => {
     if (scope === "all") return
     scope = "all"
     render()
-    void poller.triggerNow()
+    void poller.triggerNow({ invalidate: true })
   })
 
   roleBuildBtn.addEventListener("click", () => {
@@ -1450,36 +1440,6 @@ if (root) {
     return `session:${muxSession}:close`
   }
 
-  /** 请求关闭整个复用器会话；新端点类型就地声明，不依赖共享 src/types.ts。 */
-  async function closeSessionRequest(body: CloseSessionBody): Promise<CloseSessionResponse> {
-    const result = await host.serviceRequest({
-      method: "POST",
-      path: "/session/close",
-      body: JSON.stringify(body),
-    })
-    if (result.status >= 400) {
-      let message = `HTTP ${result.status}`
-      try {
-        const parsed = JSON.parse(result.body) as { error?: unknown }
-        if (typeof parsed.error === "string" && parsed.error) message = parsed.error
-      } catch {
-        if (result.body) message = result.body
-      }
-      if (result.status === 404 && (message === "HTTP 404" || message === "Not found")) {
-        message = "未找到对应会话，或当前本地服务不支持关闭会话"
-      }
-      throw new ServiceApiError(result.status, message)
-    }
-    if (!result.body) {
-      throw new ServiceApiError(result.status, "服务返回了空响应")
-    }
-    try {
-      return JSON.parse(result.body) as CloseSessionResponse
-    } catch {
-      throw new ServiceApiError(result.status, "服务返回了无法解析的响应内容")
-    }
-  }
-
   async function executeRemoveTask(task: TaskView): Promise<void> {
     const key = `${task.id}:remove`
     if (busyActions.has(key) || busyActions.has(sessionBusyKey(task.muxSession))) return
@@ -1521,7 +1481,7 @@ if (root) {
     closeDialogError = ""
     render()
     try {
-      const res = await closeSessionRequest({ cwd: target.cwd })
+      const res = await client.closeSession({ cwd: target.cwd })
       if (!res.ok) {
         throw new Error(`未能关闭会话 ${target.muxSession}`)
       }
@@ -2527,7 +2487,7 @@ if (root) {
     }
     if (changed) {
       render()
-      if (shouldTrigger) void poller.triggerNow()
+      if (shouldTrigger) void poller.triggerNow({ invalidate: true })
     }
   }
 
