@@ -106,9 +106,7 @@ function parseStringMapping(
   }
 
   if (invalid > 0) {
-    console.warn(
-      `[auto-model-config] Ignored ${invalid} invalid ${kind} entr${invalid === 1 ? "y" : "ies"} in ${configPath}`,
-    )
+    console.warn(`[auto-model-config] 已忽略 ${configPath} 中 ${invalid} 条无效的 ${kind} 条目`)
   }
   return Object.keys(result).length > 0 ? result : undefined
 }

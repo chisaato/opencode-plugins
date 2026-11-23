@@ -167,7 +167,7 @@ async function readConfigFile(configPath: string): Promise<ConfigRead> {
       return { kind: "missing" }
     }
     const reason = error instanceof Error ? error.message : String(error)
-    console.warn(`[skill-filter] Failed to read config at ${resolved}: ${reason}`)
+    console.warn(`[skill-filter] 读取配置文件失败 ${resolved}: ${reason}`)
     return { kind: "rejected" }
   }
 

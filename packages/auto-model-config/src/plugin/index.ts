@@ -168,7 +168,7 @@ export const AutoModelConfigPlugin = Plugin.define({
     let timer: ReturnType<typeof setTimeout> | undefined
 
     const report = (error: unknown) => {
-      console.error("[auto-model-config] Failed to refresh models:", error)
+      console.error("[auto-model-config] 刷新模型数据失败:", error)
     }
     const refresh = async (initial = false) => {
       if (disposed || running || (!initial && handledRevision === revision)) return

@@ -80,8 +80,8 @@ describe("loadConfig", () => {
       expect(result!.mapping).toEqual({ custom: { valid: criteria, string: "kenari/hy4-flash" } })
       expect(result!.costMapping).toEqual({ custom: { valid: criteria } })
       expect(getMappingTarget(result!, "custom", "valid")).toEqual(criteria)
-      expect(warn.mock.calls.some(([message]) => String(message).includes("3 invalid mapping entries"))).toBe(true)
-      expect(warn.mock.calls.some(([message]) => String(message).includes("2 invalid costMapping entries"))).toBe(true)
+      expect(warn.mock.calls.some(([message]) => String(message).includes("3 条无效的 mapping 条目"))).toBe(true)
+      expect(warn.mock.calls.some(([message]) => String(message).includes("2 条无效的 costMapping 条目"))).toBe(true)
     } finally {
       warn.mockRestore()
     }

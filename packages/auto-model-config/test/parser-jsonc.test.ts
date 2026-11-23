@@ -230,6 +230,6 @@ describe("loadConfig JSONC search order", () => {
     expect(result).not.toBeNull()
     expect(result!.mapping).toEqual({})
     expect(result!.costMapping).toEqual({ p: { good: "a/b" } })
-    expect(warnings().some((message) => message.includes("invalid costMapping"))).toBe(true)
+    expect(warnings().some((message) => message.includes("无效的 costMapping 条目"))).toBe(true)
   })
 })
