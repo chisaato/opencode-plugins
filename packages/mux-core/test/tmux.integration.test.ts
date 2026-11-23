@@ -186,7 +186,7 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
       expect((await windows()).stdout.trim()).toBe(last.paneId)
       expect(await manager.listTasks({ cwd, name: first.name })).toMatchObject([{ id: first.id, status: "gone" }])
     })
-    await expect(manager.sendInput(first.id, "anything")).rejects.toThrow("no live pane")
+    await expect(manager.sendInput(first.id, "anything")).rejects.toMatchObject({ code: "TASK_NO_LIVE_PANE" })
 
     expect((await tmux("send-keys", "-t", last.paneId, "C-d")).exitCode).toBe(0)
     await vi.waitFor(async () => {

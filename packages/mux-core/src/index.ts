@@ -1,5 +1,7 @@
 export * from "./types"
+export * from "./errors"
 export * from "./backend"
 export * from "./tmux"
 export * from "./state"
+export * from "./lock"
 export * from "./manager"

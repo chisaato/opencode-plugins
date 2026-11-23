@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto"
 import { basename, resolve } from "node:path"
 import { buildAttachCommand, createCommandRunner, detectMuxBackend, supportsPosixMuxFeatures } from "./backend"
+import { MuxError } from "./errors"
+import { withStateLock } from "./lock"
 import { createMuxState, isSafeTaskId } from "./state"
 import { createMuxClient } from "./tmux"
 import type {
@@ -10,6 +12,7 @@ import type {
 } from "./types"
 
 const now = () => new Date().toISOString()
+const noLivePane = (id: string) => new MuxError("TASK_NO_LIVE_PANE", `Mux task ${id} has no live pane`)
 
 export function projectMuxSession(cwd: string): string {
   const directory = resolve(cwd)
@@ -47,6 +50,10 @@ function matches(task: ManagedTask, filter: TaskFilter): boolean {
 
 const delay = (ms: number) => new Promise<void>((done) => { setTimeout(done, ms) })
 
+function sameRun(a: ManagedTask, b: ManagedTask): boolean {
+  return a.id === b.id && a.paneId === b.paneId && a.panePid === b.panePid && a.restartCount === b.restartCount
+}
+
 export function createMuxManager(options: MuxManagerOptions = {}) {
   const runner = options.runner ?? createCommandRunner()
   const state = createMuxState(options.stateDir)
@@ -59,7 +66,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
       socketName: options.socketName ?? options.backend.socketName,
     })
     return backendPromise ??= detectMuxBackend({ ...options, runner }).then((backend) => {
-      if (!backend) throw new Error("No tmux or psmux executable found")
+      if (!backend) throw new MuxError("BACKEND_UNAVAILABLE", "No tmux or psmux executable found")
       return backend
     }).catch((error) => {
       backendPromise = undefined
@@ -87,18 +94,16 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     }
   }
 
-  // 序列化单个管理器内的读改写；等待命令结束时不占用此队列。
+  // 单个管理器内按入队顺序执行短操作；跨管理器的互斥由状态锁负责。
   let queue: Promise<unknown> = Promise.resolve()
   function serial<T>(work: () => Promise<T>): Promise<T> {
     const result = queue.then(work)
     queue = result.catch(() => {})
     return result
   }
+  const locked = <T>(work: () => Promise<T>) => serial(() => withStateLock(state.stateDir, work))
 
-  async function reconcile(): Promise<ManagedTask[]> {
-    const backend = await getBackend()
-    const [stored, panes] = await Promise.all([state.listTasks(), (await client()).listPanes()])
-    const byId = new Map(stored.map((task) => [task.id, task]))
+  function managedPanes(panes: LivePaneInfo[]) {
     const liveById = new Map<string, LivePaneInfo[]>()
     for (const pane of panes) {
       if (!pane.managed || !pane.taskId || !isSafeTaskId(pane.taskId) || !pane.role) continue
@@ -106,12 +111,13 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
       if (!current.some(({ paneId }) => paneId === pane.paneId)) current.push(pane)
       liveById.set(pane.taskId, current)
     }
+    return liveById
+  }
 
-    const tasks: ManagedTask[] = []
-    for (const storedTask of stored) {
-      if (storedTask.muxKind !== backend.kind || storedTask.socketName !== backend.socketName) continue
+  async function taskSnapshot(backend: MuxBackend, storedTask: ManagedTask | undefined, candidates: LivePaneInfo[]) {
+    if (storedTask) {
+      if (storedTask.muxKind !== backend.kind || storedTask.socketName !== backend.socketName) return
       // paneId 可在服务重启后复用；必须同时匹配 pane 上的任务标识。
-      const candidates = liveById.get(storedTask.id) ?? []
       const pane = candidates.find(({ paneId }) => paneId === storedTask.paneId)
         ?? (candidates.length === 1 ? candidates[0] : undefined)
       const panePid = pane?.panePid ?? (pane?.paneDead && pane.paneId === storedTask.paneId ? storedTask.panePid : undefined)
@@ -119,9 +125,6 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
       const restarted = !!pane && (pane.paneId !== storedTask.paneId
         || (pane.panePid !== undefined && storedTask.panePid !== undefined && pane.panePid !== storedTask.panePid)
         || (!pane.paneDead && exitCode === undefined && storedTask.status !== "running"))
-      if (restarted && (pane.paneId !== storedTask.paneId || (storedTask.panePid !== undefined && panePid !== storedTask.panePid))) {
-        await state.deleteExitFile(storedTask)
-      }
       const stopRequested = restarted ? undefined : storedTask.stopRequested
       const task = pane ? {
         ...storedTask,
@@ -137,16 +140,12 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
         status: (storedTask.forceStopped ? "stopped" : "gone") as ManagedTask["status"],
         shell: undefined,
       }
-      if (JSON.stringify(task) !== JSON.stringify(storedTask)) {
-        task.updatedAt = now()
-        await state.writeTask(task)
-      }
-      tasks.push(task)
+      return task
     }
 
-    for (const [id, candidates] of liveById) {
-      if (byId.has(id) || candidates.length !== 1) continue
-      const pane = candidates[0]
+    if (candidates.length === 1) {
+      const [pane] = candidates
+      const id = pane.taskId!
       const timestamp = now()
       const task: ManagedTask = {
         id, role: pane.role!, name: pane.taskName ?? pane.windowName,
@@ -156,14 +155,69 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
         ...paneResult(pane, await readExitCode(backend, pane, id)), restartCount: 0,
         createdAt: timestamp, updatedAt: timestamp,
       }
-      await state.writeTask(task)
+      return task
+    }
+  }
+
+  // 必须由持锁调用方提交；不能用锁外读取的快照直接写状态。
+  async function writeReconciled(task: ManagedTask, previous?: ManagedTask) {
+    if (JSON.stringify(task) === JSON.stringify(previous)) return
+    if (previous && task.restartCount !== previous.restartCount && (task.paneId !== previous.paneId
+      || (previous.panePid !== undefined && task.panePid !== previous.panePid))) {
+      await state.deleteExitFile(previous)
+    }
+    task.updatedAt = now()
+    await state.writeTask(task)
+  }
+
+  async function reconcile(): Promise<ManagedTask[]> {
+    const backend = await getBackend()
+    const [stored, panes] = await Promise.all([state.listTasks(), (await client()).listPanes()])
+    const byId = new Map(stored.map((task) => [task.id, task]))
+    const liveById = managedPanes(panes)
+    const tasks: ManagedTask[] = []
+    for (const id of new Set([...byId.keys(), ...liveById.keys()])) {
+      const previous = byId.get(id)
+      const task = await taskSnapshot(backend, previous, liveById.get(id) ?? [])
+      if (!task) continue
+      await writeReconciled(task, previous)
       tasks.push(task)
     }
     return tasks
   }
 
-  async function find(id: string): Promise<ManagedTask | undefined> {
-    return (await reconcile()).find((task) => task.id === id)
+  async function readTaskSnapshot(id: string) {
+    if (!isSafeTaskId(id)) return {}
+    const backend = await getBackend()
+    const previous = await state.readTask(id)
+    const panes = await (await client()).listPanes()
+    const task = await taskSnapshot(backend, previous, managedPanes(panes.filter((pane) => pane.taskId === id)).get(id) ?? [])
+    return { task, previous }
+  }
+
+  async function observe(id: string) {
+    return (await readTaskSnapshot(id)).task
+  }
+
+  async function find(id: string) {
+    const { task, previous } = await readTaskSnapshot(id)
+    if (task) await writeReconciled(task, previous)
+    return task
+  }
+
+  async function captureForRun(task: ManagedTask, lines?: number) {
+    const mux = await client()
+    let tail: string
+    try {
+      tail = await mux.capturePane(task.paneId, lines)
+    } catch (error) {
+      const current = await observe(task.id)
+      if (current && sameRun(current, task) && current.status !== "gone" && !current.forceStopped) throw error
+      return { task: current }
+    }
+    const current = await observe(task.id)
+    // 捕获在锁外；同一 pane 可能已被 respawn，不能把新一轮的日志返回给旧请求。
+    return { task: current, tail: current && sameRun(current, task) && current.status !== "gone" && !current.forceStopped ? tail : undefined }
   }
 
   async function findNamed(role: TaskRole, { name, cwd }: TaskIdentity): Promise<ManagedTask | undefined> {
@@ -215,7 +269,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     duration(tailLines, "tailLines")
     const identity = { ...options, cwd: resolve(options.cwd) }
     const channel = wait ? `oc-build-${randomUUID()}` : undefined
-    const initial = await serial(async () => start("build", identity, options.command, await findNamed("build", identity), channel))
+    const initial = await locked(async () => start("build", identity, options.command, await findNamed("build", identity), channel))
     if (!wait) return { ok: initial.status !== "gone", task: initial, tail: "", timedOut: false }
     const mux = await client()
     const controller = new AbortController()
@@ -227,7 +281,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     }, () => {})
     let task = initial
     try {
-      while (task.status === "running" && task.restartCount === initial.restartCount) {
+      while (task.status === "running" && sameRun(task, initial)) {
         const remaining = deadline - Date.now()
         if (remaining <= 0) break
         const interval = Math.min(remaining, polling)
@@ -241,58 +295,81 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
           })
           wake = undefined
         }
-        task = await serial(() => find(initial.id)) ?? { ...task, status: "gone" }
+        task = await observe(initial.id) ?? { ...task, status: "gone" }
       }
     } finally {
       controller.abort()
     }
-    const sameRun = task.restartCount === initial.restartCount
+    if (sameRun(task, initial) && task.status !== "running") {
+      task = await locked(async () => {
+        const { task: current, previous } = await readTaskSnapshot(initial.id)
+        if (current && sameRun(current, initial)) await writeReconciled(current, previous)
+        return current ?? { ...initial, status: "gone" }
+      })
+    }
     let tail = ""
-    if (sameRun && task.status !== "gone") {
-      try {
-        tail = await mux.capturePane(task.paneId, tailLines)
-      } catch (error) {
-        const current = await serial(() => find(task.id))
-        if (current && current.status !== "gone" && current.restartCount === task.restartCount) throw error
-        task = current ?? { ...task, status: "gone" }
-      }
+    if (sameRun(task, initial) && task.status !== "gone" && !task.forceStopped) {
+      const captured = await captureForRun(task, tailLines)
+      if (captured.tail === undefined) task = captured.task ?? { ...task, status: "gone" }
+      tail = captured.tail ?? ""
     }
     return {
-      ok: task.restartCount === initial.restartCount && task.status === "succeeded", task, tail,
-      timedOut: sameRun && task.status === "running",
+      ok: sameRun(task, initial) && task.status === "succeeded", task, tail,
+      timedOut: sameRun(task, initial) && task.status === "running",
     }
   }
 
-  async function stop(task: ManagedTask, options: StopTaskOptions): Promise<ServiceActionResult> {
-    if (task.status !== "running") return { ok: task.status !== "gone", task }
-    const timeout = duration(options.timeoutMs ?? 2_000, "timeoutMs")
-    const mux = await client()
-    const requested = { ...task, stopRequested: true, updatedAt: now() }
-    await state.writeTask(requested)
-    try {
-      await mux.sendInterrupt(task.paneId)
-    } catch (error) {
-      const current = await find(task.id)
-      if (current?.status !== "running") return { ok: current?.status === "stopped", task: current }
-      await state.writeTask({ ...current, stopRequested: task.stopRequested })
-      throw error
+  async function stop(lookup: () => Promise<ManagedTask | undefined>, options: StopTaskOptions): Promise<ServiceActionResult> {
+    const begin = await locked(async (): Promise<{ requested: ManagedTask; timeout: number } | ServiceActionResult> => {
+      const task = await lookup()
+      if (!task) return { ok: false }
+      if (task.status !== "running") return { ok: task.status !== "gone", task }
+      const timeout = duration(options.timeoutMs ?? 2_000, "timeoutMs")
+      const mux = await client()
+      const requested = { ...task, stopRequested: true, updatedAt: now() }
+      await state.writeTask(requested)
+      try {
+        await mux.sendInterrupt(task.paneId)
+      } catch (error) {
+        const current = await find(task.id)
+        if (!current || !sameRun(current, requested)) return { ok: false, task: current }
+        if (current.status !== "running") return { ok: current.status === "stopped", task: current }
+        await state.writeTask({ ...current, stopRequested: task.stopRequested })
+        throw error
+      }
+      return { requested, timeout }
+    })
+    if (!("requested" in begin)) return begin
+
+    const { requested, timeout } = begin
+    const deadline = performance.now() + timeout
+    let observed = await observe(requested.id)
+    while (observed?.status === "running" && sameRun(observed, requested)) {
+      const remaining = deadline - performance.now()
+      if (remaining <= 0) break
+      await delay(Math.min(polling, remaining))
+      observed = await observe(requested.id)
     }
 
-    const deadline = Date.now() + timeout
-    let current = await find(task.id) ?? requested
-    while (current.status === "running" && current.restartCount === task.restartCount && Date.now() < deadline) {
-      await delay(Math.min(polling, Math.max(0, deadline - Date.now())))
-      current = await find(task.id) ?? requested
-    }
-    if (current.restartCount !== task.restartCount) return { ok: false, task: current }
-    if (current.status !== "running") return { ok: current.status === "stopped", task: current }
-    if (!options.force) return { ok: false, task: current, timedOut: true }
+    if (observed && !sameRun(observed, requested)) return { ok: false, task: observed }
+    if (observed?.status === "running" && !options.force) return { ok: false, task: observed, timedOut: true }
 
-    await mux.killPane(task.paneId)
-    await state.deleteExitFile(task)
-    const stopped: ManagedTask = { ...current, status: "stopped", forceStopped: true, panePid: undefined, updatedAt: now() }
-    await state.writeTask(stopped)
-    return { ok: true, task: stopped }
+    return locked(async () => {
+      const { task: current, previous } = await readTaskSnapshot(requested.id)
+      // 等待期间可重启或移除任务。即使 paneId 没变，也不能向新一轮运行发出 kill。
+      if (!current || !sameRun(current, requested)) return { ok: false, task: current }
+      if (current.status !== "running") {
+        await writeReconciled(current, previous)
+        return { ok: current.status === "stopped", task: current }
+      }
+      if (!options.force || performance.now() < deadline) return { ok: false, task: current, timedOut: performance.now() >= deadline }
+
+      await (await client()).killPane(current.paneId)
+      await state.deleteExitFile(current)
+      const stopped: ManagedTask = { ...current, status: "stopped", forceStopped: true, panePid: undefined, updatedAt: now() }
+      await state.writeTask(stopped)
+      return { ok: true, task: stopped }
+    })
   }
 
   async function deleteTaskState(task: ManagedTask): Promise<void> {
@@ -311,18 +388,19 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
 
   async function serviceAction(options: ServiceActionOptions): Promise<ServiceActionResult> {
     const identity = { ...options, cwd: resolve(options.cwd) }
-    return serial(async () => {
+    const { action } = options
+    if (action === "stop") return stop(() => findNamed("service", identity), options)
+    return locked(async () => {
       const task = await findNamed("service", identity)
-      switch (options.action) {
+      switch (action) {
         case "status": return { ok: !!task, task }
-        case "stop": return task ? stop(task, options) : { ok: false }
         case "remove": return task ? remove(task) : { ok: false }
         case "start":
           if (task?.status === "running" && !options.restartIfRunning) return { ok: true, task }
           // fall through
         case "restart": {
           const command = options.command ?? task?.command
-          if (command === undefined) throw new Error("A command is required for a new service")
+          if (command === undefined) throw new MuxError("COMMAND_REQUIRED", "A command is required for a new service")
           const started = await start("service", identity, command, task)
           return { ok: started.status !== "gone", task: started }
         }
@@ -331,7 +409,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
   }
 
   function restartTask(id: string, options: RestartTaskOptions = {}): Promise<ServiceActionResult> {
-    return serial(async () => {
+    return locked(async () => {
       const task = await find(id)
       if (!task) return { ok: false }
       const started = await start(task.role, { ...task, ...options }, options.command ?? task.command, task)
@@ -340,21 +418,18 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
   }
 
   function stopTask(id: string, options: StopTaskOptions = {}): Promise<ServiceActionResult> {
-    return serial(async () => {
-      const task = await find(id)
-      return task ? stop(task, options) : { ok: false }
-    })
+    return stop(() => find(id), options)
   }
 
   function removeTask(id: string): Promise<ServiceActionResult> {
-    return serial(async () => {
+    return locked(async () => {
       const task = await find(id)
       return task ? remove(task) : { ok: false }
     })
   }
 
   function closeSession({ cwd = process.cwd() }: { cwd?: string } = {}) {
-    return serial(async () => {
+    return locked(async () => {
       const sessionName = projectMuxSession(cwd)
       // 关闭前发现会话内未入库的受管 pane，同时保留已丢失 pane 的记录以便清理。
       const tasks = (await reconcile()).filter((task) => task.muxSession === sessionName)
@@ -367,7 +442,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
   async function liveTask(id: string): Promise<ManagedTask> {
     const task = await find(id)
     if (!task || task.status === "gone" || task.forceStopped) {
-      throw new Error(`Mux task ${id} has no live pane`)
+      throw noLivePane(id)
     }
     return task
   }
@@ -380,17 +455,24 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     stopTask,
     removeTask,
     closeSession,
-    captureLogs: (id: string, lines?: number) => serial(async () => (await client()).capturePane((await liveTask(id)).paneId, lines)),
-    sendInput: (id: string, input: string, { enter }: SendInputOptions = {}) => serial(async () => {
+    captureLogs: async (id: string, lines?: number) => {
+      const task = await observe(id)
+      if (!task || task.status === "gone" || task.forceStopped) throw noLivePane(id)
+      const { tail } = await captureForRun(task, lines)
+      if (tail === undefined) throw noLivePane(id)
+      return tail
+    },
+    sendInput: (id: string, input: string, { enter }: SendInputOptions = {}) => locked(async () => {
       const task = await liveTask(id)
       const mux = await client()
-      if (!(await mux.listPanes()).some((pane) => pane.paneId === task.paneId && pane.taskId === id && pane.managed && !pane.paneDead)) {
-        throw new Error(`Mux task ${id} has no live pane`)
+      if (!(await mux.listPanes()).some((pane) => pane.paneId === task.paneId && pane.taskId === id
+        && pane.panePid === task.panePid && pane.managed && !pane.paneDead)) {
+        throw noLivePane(id)
       }
       await mux.sendKeys(task.paneId, input, enter)
     }),
-    listTasks: (filter: TaskFilter = {}) => serial(async () => (await reconcile()).filter((task) => matches(task, filter))),
-    pruneGone: (filter: TaskFilter = {}) => serial(async () => {
+    listTasks: (filter: TaskFilter = {}) => locked(async () => (await reconcile()).filter((task) => matches(task, filter))),
+    pruneGone: (filter: TaskFilter = {}) => locked(async () => {
       const gone = (await reconcile()).filter((task) => task.status === "gone" && matches(task, filter))
       await Promise.all(gone.map(deleteTaskState))
       return gone

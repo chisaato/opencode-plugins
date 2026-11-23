@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   buildAttachCommand, createMuxClient, createMuxManager, createMuxState, detectMuxBackend,
-  MuxCommandError, projectMuxSession, resolveMuxStateDir, stripAnsi, wrapShellCommand,
+  MuxCommandError, MuxError, projectMuxSession, resolveMuxStateDir, stripAnsi, wrapShellCommand,
 } from "../src"
 import type { CommandResult, CommandRunner } from "../src"
 
@@ -121,6 +121,19 @@ describe("mux manager", () => {
     return marker
   }
 
+  it("保留后端探测的 null 契约，由管理器返回错误码", async () => {
+    const runner: CommandRunner = async () => ({ exitCode: 1, stdout: "", stderr: "" })
+    await expect(detectMuxBackend({ runner })).resolves.toBeNull()
+    const result = createMuxManager({ runner }).getBackend()
+    await expect(result).rejects.toBeInstanceOf(MuxError)
+    await expect(result).rejects.toMatchObject({ code: "BACKEND_UNAVAILABLE" })
+  })
+
+  it("日志和输入对缺少存活窗格的任务返回错误码", async () => {
+    await expect(manager.captureLogs("missing-task")).rejects.toMatchObject({ code: "TASK_NO_LIVE_PANE" })
+    await expect(manager.sendInput("missing-task", "x")).rejects.toMatchObject({ code: "TASK_NO_LIVE_PANE" })
+  })
+
   it.each([false, true])("移除构建及哨兵，pane 已消失：%s", async (missingPane) => {
     const { task } = await manager.runBuild({ ...identity, command: "sleep 60", wait: false })
     const marker = await writeExitMarker(task)
@@ -193,7 +206,7 @@ describe("mux manager", () => {
     expect(await manager.serviceAction({ ...identity, action: "stop" })).toMatchObject({
       ok: true, task: { status: "stopped", exitCode: 130 },
     })
-    await expect(manager.sendInput(started.id, "anything")).rejects.toThrow("no live pane")
+    await expect(manager.sendInput(started.id, "anything")).rejects.toMatchObject({ code: "TASK_NO_LIVE_PANE" })
     expect(await manager.captureLogs(started.id, 1)).toBe("second")
     expect(await manager.serviceAction({ ...identity, action: "start" })).toMatchObject({
       ok: true, task: { status: "running", paneId: started.paneId, restartCount: 2 },
@@ -243,7 +256,7 @@ describe("mux manager", () => {
   })
 
   it("handles absent servers but never marks tasks gone after unexpected mux errors", async () => {
-    await expect(manager.serviceAction({ ...identity, action: "start" })).rejects.toThrow("command is required")
+    await expect(manager.serviceAction({ ...identity, action: "start" })).rejects.toMatchObject({ code: "COMMAND_REQUIRED" })
     await expect(manager.runBuild({ ...identity, command: " " })).rejects.toThrow("non-empty")
     await expect(manager.runBuild({ ...identity, command: "exit 0", timeoutMs: -1 })).rejects.toThrow(RangeError)
     await expect(manager.runBuild({ ...identity, command: "invalid respawn" })).rejects.toThrow(MuxCommandError)

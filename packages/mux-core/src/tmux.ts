@@ -137,6 +137,11 @@ export class MuxCommandError extends Error {
     super(`${subcommand} failed (${result.exitCode ?? result.signal ?? "no exit code"}): ${result.stderr.trim()}`)
     this.name = "MuxCommandError"
   }
+
+  get isMissingPane(): boolean {
+    return (this.subcommand === "capture-pane" || this.subcommand === "send-keys")
+      && /can't find pane|no such pane|pane not found|no server running|no sessions|no such file or directory/i.test(this.result.stderr)
+  }
 }
 
 export interface RespawnPaneOptions {
