@@ -18,6 +18,8 @@ function fakeManager() {
   return {
     getBackend: vi.fn<MuxManager["getBackend"]>().mockResolvedValue(backend),
     listTasks: vi.fn<MuxManager["listTasks"]>().mockResolvedValue([task]),
+    listPanes: vi.fn<MuxManager["listPanes"]>().mockResolvedValue([]),
+    adoptPane: vi.fn<MuxManager["adoptPane"]>().mockResolvedValue(task),
     attachCommand: vi.fn<MuxManager["attachCommand"]>().mockResolvedValue(attachCommand),
     runBuild: vi.fn<MuxManager["runBuild"]>().mockResolvedValue({ ok: true, task, tail: "output", timedOut: false }),
     serviceAction: vi.fn<MuxManager["serviceAction"]>().mockResolvedValue({ ok: true, task: { ...task, role: "service" } }),
