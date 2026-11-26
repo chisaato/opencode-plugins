@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "build": "bun scripts/build.ts",
+    "package": "bun scripts/package-extension.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check:guest": "bunx openchamber-guest-check ."
