@@ -47,6 +47,55 @@ export function quotePosixShell(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
+/**
+ * 命令在非交互 shell 中执行完后，exec 交互 shell 供人工接管。
+ * 通过临时 rc 文件在交互 shell 启动末尾把刚执行的命令注入其历史，
+ * 这样在 pane 里按 Up 能调出 mux 执行过的命令。使用 shell 自身的历史
+ * API（zsh 的 print -s / bash 的 history -s），避免直接改写 HISTFILE
+ * 带来的格式、路径和 SHARE_HISTORY 覆盖问题。其他 shell 走原有 fallback。
+ */
+function interactiveShellWithHistory(command: string): string {
+  const zshRcLines = [
+    'unset ZDOTDIR',
+    '[ -r "${HOME}/.zshrc" ] && source "${HOME}/.zshrc"',
+    '__oc_mux_inject_history() {',
+    '  precmd_functions=(${precmd_functions:#__oc_mux_inject_history})',
+    '  unfunction __oc_mux_inject_history 2>/dev/null',
+    '  if [ -n "${__OC_HIST_DIR:-}" ]; then rm -rf "$__OC_HIST_DIR"; unset __OC_HIST_DIR; fi',
+    '  if [ -n "${__OC_HIST_CMD:-}" ]; then print -s -- "$__OC_HIST_CMD"; unset __OC_HIST_CMD; fi',
+    '}',
+    'precmd_functions+=(__oc_mux_inject_history)',
+  ]
+  const bashRcLines = [
+    '[ -r /etc/bash.bashrc ] && . /etc/bash.bashrc',
+    '[ -r "${HOME}/.bashrc" ] && . "${HOME}/.bashrc"',
+    '__oc_mux_inject_history() {',
+    '  if [ -n "${__OC_HIST_CMD:-}" ]; then history -s -- "$__OC_HIST_CMD"; unset __OC_HIST_CMD; fi',
+    '  if [ -n "${__OC_HIST_DIR:-}" ]; then rm -rf "$__OC_HIST_DIR"; unset __OC_HIST_DIR; fi',
+    '  unset -f __oc_mux_inject_history',
+    '}',
+    'if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then',
+    '  PROMPT_COMMAND+=(__oc_mux_inject_history)',
+    'else',
+    '  __OC_PC="${PROMPT_COMMAND:-}"',
+    '  PROMPT_COMMAND="__oc_mux_inject_history${__OC_PC:+;$__OC_PC}"',
+    'fi',
+  ]
+  const writeZshRc = `printf '%s\\n' ${zshRcLines.map(quotePosixShell).join(' ')} > "$__oc_tmp/.zshrc"`
+  const writeBashRc = `printf '%s\\n' ${bashRcLines.map(quotePosixShell).join(' ')} > "$__oc_tmp/bashrc"`
+  const tmpDir = '"${TMPDIR:-/tmp}/oc-mux-hist.XXXXXX"'
+  return [
+    `__oc_hist_cmd=${quotePosixShell(command)};`,
+    '__oc_shell=${SHELL:-};',
+    'case ${__oc_shell##*/} in',
+    `zsh) if __oc_tmp=$(mktemp -d ${tmpDir}); then ${writeZshRc}; __OC_HIST_DIR="$__oc_tmp" __OC_HIST_CMD="$__oc_hist_cmd" ZDOTDIR="$__oc_tmp" exec "$__oc_shell" -i; fi ;;`,
+    `bash) if __oc_tmp=$(mktemp -d ${tmpDir}); then ${writeBashRc}; __OC_HIST_DIR="$__oc_tmp" __OC_HIST_CMD="$__oc_hist_cmd" exec "$__oc_shell" --rcfile "$__oc_tmp/bashrc" -i; fi ;;`,
+    'esac;',
+    'if [ -n "$__oc_shell" ] && [ -x "$__oc_shell" ]; then exec "$__oc_shell" -i;',
+    'elif [ -x /bin/bash ]; then exec /bin/bash -i; else exec /bin/sh -i; fi',
+  ].join(' ')
+}
+
 export function muxCommandArgs(backend: MuxBackend, args: readonly string[]): string[] {
   const socket = backend.socketName ? ["-L", backend.socketName] : []
   // tmux 仅在启动 server 时处理 -f；不要给 attach 或其他命令传宿主配置。
@@ -88,8 +137,7 @@ export function wrapShellCommand(backend: MuxBackend, command: string, channel?:
       + 'if __oc_tmp=$(mktemp "${__oc_exit}.XXXXXX"); then '
       + 'if ! { printf \'%s\\n\' "$__rc" > "$__oc_tmp" && mv -f "$__oc_tmp" "$__oc_exit"; }; then rm -f "$__oc_tmp"; fi; fi; '
       + signal
-      + 'if [ -n "$SHELL" ] && [ -x "$SHELL" ]; then exec "$SHELL" -i; '
-      + 'elif [ -x /bin/bash ]; then exec /bin/bash -i; else exec /bin/sh -i; fi']
+      + interactiveShellWithHistory(command)]
   }
   if (!channel) return useCmd(backend) ? ["cmd.exe", "/d", "/c", direct] : ["sh", "-lc", direct]
   const args = muxCommandArgs(backend, ["wait-for", "-S", channel])

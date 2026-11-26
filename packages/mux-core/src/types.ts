@@ -10,6 +10,7 @@ export interface ManagedTask {
   name: string
   cwd: string
   command: string
+  runningCommand?: string
   /** 调用方的 OpenCode 会话，与复用器会话相互独立。 */
   sessionId?: string
   source?: TriggerSource
@@ -38,6 +39,7 @@ export interface LivePaneInfo {
   panePid?: number
   paneCurrentPath: string
   paneCurrentCommand: string
+  foregroundCommand?: string
   paneDead: boolean
   exitCode?: number
   paneTitle: string
@@ -141,6 +143,21 @@ export interface RestartTaskOptions {
   command?: string
   sessionId?: string
   source?: TriggerSource
+  /** "respawn" reuses the pane; "input" interrupts and types into the same shell. */
+  mode?: "respawn" | "input"
+}
+
+export interface AdoptPaneOptions {
+  paneId: string
+  name?: string
+  cwd?: string
+  role?: TaskRole
+  command?: string
+}
+
+export interface PaneFilter {
+  cwd?: string
+  all?: boolean
 }
 
 export interface ServiceActionOptions extends TaskIdentity, StopTaskOptions {

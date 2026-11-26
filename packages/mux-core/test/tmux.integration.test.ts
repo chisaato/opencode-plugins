@@ -52,6 +52,44 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
     }
   })
 
+  it("adopts a manual pane and restarts by input without replacing its shell", async () => {
+    const session = "manual-adoption"
+    const mux = createMuxClient(backend, runner)
+    expect((await tmux("new-session", "-d", "-s", session)).exitCode).toBe(0)
+    let paneId: string | undefined
+    try {
+      // An interactive shell survives C-c; a pane running sleep directly does not.
+      const manual = await tmux("new-window", "-d", "-t", `${session}:`, "-c", dir, "-P", "-F", "#{pane_id}", "/bin/sh -i")
+      expect(manual.exitCode).toBe(0)
+      paneId = manual.stdout.trim()
+      await mux.sendKeys(paneId, "export ADOPTION_MARKER=preserved; sleep 60", true)
+      await vi.waitFor(async () => expect((await mux.listPanes()).find((pane) => pane.paneId === paneId)).toMatchObject({
+        managed: false, foregroundCommand: expect.stringContaining("sleep 60"),
+      }))
+      expect((await manager.listPanes()).some((pane) => pane.paneId === paneId)).toBe(false)
+      expect(await manager.listPanes({ all: true, cwd: dir })).toContainEqual(expect.objectContaining({ paneId }))
+      const before = (await mux.listPanes()).find((pane) => pane.paneId === paneId)!
+      const remain = await tmux("show-options", "-Apv", "-t", paneId, "remain-on-exit")
+      const hooks = await tmux("show-hooks", "-p", "-t", paneId)
+      const task = await manager.adoptPane({ paneId, name: "adopted" })
+      expect(task).toMatchObject({
+        paneId, status: "running", role: "service",
+        command: expect.stringContaining("sleep 60"), runningCommand: expect.stringContaining("sleep 60"),
+      })
+      expect(await manager.adoptPane({ paneId, name: "ignored" })).toEqual(task)
+      expect(await manager.listTasks({ name: "adopted" })).toContainEqual(expect.objectContaining({ id: task.id }))
+      expect((await tmux("show-options", "-Apv", "-t", paneId, "remain-on-exit")).stdout).toBe(remain.stdout)
+      expect((await tmux("show-hooks", "-p", "-t", paneId)).stdout).toBe(hooks.stdout)
+      expect(await manager.restartTask(task.id, { mode: "input", command: 'echo restarted:$ADOPTION_MARKER' })).toMatchObject({
+        ok: true, task: { id: task.id, paneId, panePid: before.panePid, command: task.command, restartCount: 0 },
+      })
+      await vi.waitFor(async () => expect(await manager.captureLogs(task.id)).toMatch(/^restarted:preserved$/m))
+      expect((await mux.listPanes()).find((pane) => pane.paneId === paneId)?.panePid).toBe(before.panePid)
+    } finally {
+      await mux.killSession(session)
+    }
+  })
+
   it("keeps fast exit panes and metadata, capturing both exit 0 and exit 42 output", async () => {
     const options = { cwd: dir, name: "fast build", sessionId: "ses_real", timeoutMs: 4_000 }
     const first = await manager.runBuild({ ...options, command: "printf 'hello-fast\\n'; exit 0" })
@@ -187,6 +225,26 @@ describe.skipIf(absent)("real tmux on an isolated socket", () => {
     expect(restarted.task).toMatchObject({ status: "running", paneId: task.paneId, restartCount: 1 })
     expect((await tmux("display-message", "-p", "-t", task.paneId, "#{pane_id}:#{pane_dead}")).stdout.trim()).toBe(`${task.paneId}:0`)
     await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("为 Byobu 创建的 mux 会话组成员启用 F3/F4/F6，不影响无关会话", async () => {
+    const { task } = await manager.runBuild({ cwd: dir, name: "grouped keys", command: "sleep 30", wait: false })
+    expect((await tmux("show-options", "-v", "-t", task.muxSession, "key-table")).stdout.trim()).toBe("mux-byobu")
+    // 不指定名称，复现 byobu-select-session 的会话组创建方式。
+    const grouped = await tmux("new-session", "-d", "-t", task.muxSession, "-P", "-F", "#{session_name}")
+    expect(grouped.exitCode).toBe(0)
+    const groupedSession = grouped.stdout.trim()
+    expect(groupedSession).toMatch(/^oc-/)
+    expect((await tmux("show-options", "-v", "-t", groupedSession, "key-table")).stdout.trim()).toBe("mux-byobu")
+    for (const [key, command] of [["F3", "previous-window"], ["F4", "next-window"], ["F6", "detach-client"]]) {
+      const binding = await tmux("list-keys", "-T", "mux-byobu", key)
+      expect(binding.exitCode).toBe(0)
+      expect(binding.stdout).toMatch(new RegExp(`${key}\\s+${command}`))
+    }
+    expect((await tmux("new-session", "-d", "-s", "unrelated-test-session")).exitCode).toBe(0)
+    expect((await tmux("show-options", "-Av", "-t", "unrelated-test-session", "key-table")).stdout.trim()).toBe("root")
+    expect((await tmux("kill-session", "-t", `=${groupedSession}`)).exitCode).toBe(0)
+    expect((await tmux("kill-session", "-t", "=unrelated-test-session")).exitCode).toBe(0)
   })
 
   it("exit 清理非当前窗口，Ctrl+D 关闭最后一个窗口并允许 prune 清理哨兵", async () => {

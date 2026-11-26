@@ -7,7 +7,7 @@ import { withStateLock } from "./lock"
 import { createMuxState, isSafeTaskId } from "./state"
 import { createMuxClient } from "./tmux"
 import type {
-  LivePaneInfo, ManagedPaneOptions, ManagedTask, MuxBackend, MuxManagerOptions,
+  AdoptPaneOptions, LivePaneInfo, ManagedPaneOptions, ManagedTask, MuxBackend, MuxManagerOptions, PaneFilter,
   RestartTaskOptions, RunBuildOptions, RunBuildResult, SendInputOptions, ServiceActionOptions,
   ServiceActionResult, StopTaskOptions, TaskFilter, TaskIdentity, TaskRole,
 } from "./types"
@@ -137,6 +137,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
         muxSession: pane.sessionName,
         paneId: pane.paneId,
         panePid,
+        runningCommand: pane.foregroundCommand,
         ...paneResult(pane, exitCode, stopRequested),
         stopRequested,
         forceStopped: undefined,
@@ -145,6 +146,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
         ...storedTask,
         status: (storedTask.forceStopped ? "stopped" : "gone") as ManagedTask["status"],
         shell: undefined,
+        runningCommand: undefined,
       }
       return task
     }
@@ -156,6 +158,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
       const task: ManagedTask = {
         id, role: pane.role!, name: pane.taskName ?? pane.windowName,
         cwd: pane.cwd ?? pane.paneCurrentPath, command: pane.command ?? pane.paneCurrentCommand,
+        runningCommand: pane.foregroundCommand,
         sessionId: pane.sessionId, muxKind: backend.kind, muxSession: pane.sessionName,
         socketName: backend.socketName, paneId: pane.paneId, panePid: pane.panePid,
         ...paneResult(pane, await readExitCode(backend, pane, id)), restartCount: 0,
@@ -262,6 +265,7 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
       id: meta.id, role, name: meta.name, cwd: meta.cwd, command, sessionId: meta.sessionId,
       source: identity.source ?? existing?.source, muxKind: backend.kind, socketName: backend.socketName,
       muxSession: pane?.sessionName ?? meta.muxSession, paneId, panePid: pane?.panePid,
+      runningCommand: pane?.foregroundCommand,
       ...(pane ? paneResult(pane, await readExitCode(backend, pane, meta.id)) : { status: "gone" as const }),
       restartCount: existing ? existing.restartCount + 1 : 0, createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp,
     }
@@ -503,6 +507,15 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     return locked(async () => {
       const task = await find(id)
       if (!task) return { ok: false }
+      if (options.mode === "input") {
+        const mux = await client()
+        if (task.status === "gone" || task.forceStopped || !(await mux.listPanes()).some((pane) =>
+          pane.paneId === task.paneId && pane.taskId === id && pane.panePid === task.panePid
+          && pane.managed && !pane.paneDead)) throw noLivePane(id)
+        await mux.sendInterrupt(task.paneId)
+        await mux.sendKeys(task.paneId, options.command ?? task.command, true)
+        return { ok: true, task }
+      }
       const started = await start(task.role, { ...task, ...options }, options.command ?? task.command, task)
       return { ok: started.status !== "gone", task: started }
     })
@@ -538,8 +551,44 @@ export function createMuxManager(options: MuxManagerOptions = {}) {
     return task
   }
 
+  async function listPanes(filter: PaneFilter = {}): Promise<LivePaneInfo[]> {
+    const cwd = filter.cwd === undefined ? undefined : resolve(filter.cwd)
+    return (await (await client()).listPanes()).filter((pane) =>
+      (filter.all === true || pane.sessionName.startsWith("oc-"))
+      && (cwd === undefined || pane.cwd === cwd || pane.paneCurrentPath === cwd))
+  }
+
+  function adoptPane(options: AdoptPaneOptions): Promise<ManagedTask> {
+    return locked(async () => {
+      const backend = await getBackend()
+      const mux = await client()
+      const pane = (await mux.listPanes()).find((pane) => pane.paneId === options.paneId)
+      if (!pane) throw noLivePane(options.paneId)
+      if (pane.managed && pane.taskId) {
+        const stored = await state.readTask(pane.taskId)
+        if (stored) return stored
+      }
+      const meta: ManagedPaneOptions = {
+        id: randomUUID(), role: options.role ?? "service",
+        name: options.name ?? pane.taskName ?? pane.foregroundCommand ?? pane.paneCurrentCommand ?? "adopted",
+        cwd: options.cwd ?? pane.cwd ?? pane.paneCurrentPath,
+        command: options.command ?? pane.foregroundCommand ?? pane.paneCurrentCommand,
+        muxSession: pane.sessionName, sessionId: pane.sessionId,
+      }
+      await mux.setPaneMetadata(pane.paneId, meta)
+      const refreshed = (await mux.listPanes()).find((current) =>
+        current.paneId === pane.paneId && current.managed && current.taskId === meta.id)
+      if (!refreshed) throw noLivePane(options.paneId)
+      const task = (await taskSnapshot(backend, undefined, [refreshed]))!
+      await writeReconciled(task)
+      return task
+    })
+  }
+
   return {
     getBackend,
+    listPanes,
+    adoptPane,
     runBuild,
     serviceAction,
     restartTask,

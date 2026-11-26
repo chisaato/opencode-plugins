@@ -11,3 +11,7 @@
 ### Domain docs
 
 探索代码、命名领域概念或讨论架构决策前，遵循 [领域文档读取规则](docs/agents/domain.md)。采用 single-context 布局；文档缺失时静默继续。
+
+## 本机开发说明
+
+涉及本机依赖、联调或内部部署时，若仓库根目录存在 `AGENTS.local.md`，先读取。若不存在，按公开文档继续；仅在缺少本机信息确实阻塞任务时，请用户参考 `AGENTS.local.md.example` 补齐所需信息。

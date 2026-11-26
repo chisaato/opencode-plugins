@@ -28,6 +28,8 @@ function harness(defaults?: Parameters<typeof createMuxTools>[2]) {
     captureLogs: vi.fn<Manager["captureLogs"]>().mockResolvedValue("line 1\nline 2"),
     sendInput: vi.fn<Manager["sendInput"]>().mockResolvedValue(undefined),
     listTasks: vi.fn<Manager["listTasks"]>().mockResolvedValue([task()]),
+    listPanes: vi.fn<Manager["listPanes"]>().mockResolvedValue([]),
+    adoptPane: vi.fn<Manager["adoptPane"]>().mockResolvedValue(task()),
     pruneGone: vi.fn<Manager["pruneGone"]>().mockResolvedValue([]),
     previewHistory: vi.fn<Manager["previewHistory"]>().mockResolvedValue([]),
     cleanHistory: vi.fn<Manager["cleanHistory"]>().mockResolvedValue({ removed: [], skipped: [], failed: [] }),
@@ -164,7 +166,7 @@ describe("任务选择、重启、日志和输入", () => {
     manager.restartTask.mockResolvedValue({ ok: true, task: restarted })
     const result = await call("mux_restart", { name: "app", role: "build", cwd: ".", command: "build --retry", tailLines: 5 }, session)
     expect(manager.listTasks).toHaveBeenCalledWith({ name: "app", role: "build", cwd: project })
-    expect(manager.restartTask).toHaveBeenCalledWith(restarted.id, { command: "build --retry", ...origin })
+    expect(manager.restartTask).toHaveBeenCalledWith(restarted.id, { command: "build --retry", mode: undefined, ...origin })
     expect(manager.captureLogs).toHaveBeenCalledWith(restarted.id, 5)
     expect(result.metadata).toMatchObject({ restartCount: 1, paneId: "%2", tail: "line 1\nline 2" })
   })
@@ -268,5 +270,49 @@ describe("mux_clean_history", () => {
     expect(manager.closeSession).not.toHaveBeenCalled()
     expect(result.metadata).toEqual({ ok: false, cwd: resolve(project, "sub"), ...outcome })
     expect(result.content[0].text).toContain("permission denied")
+  })
+})
+
+describe("mux_panes / mux_adopt", () => {
+  const pane = (overrides: Record<string, unknown> = {}) => ({
+    paneId: "%12", sessionName: "oc-project", windowIndex: 0,
+    cwd: project, paneCurrentPath: project, paneCurrentCommand: "zsh",
+    foregroundCommand: "npm run dev", managed: false, ...overrides,
+  })
+
+  it("mux_panes 列出所有窗格，显示实际命令，默认限定当前项目的 oc- 会话", async () => {
+    const { manager, call } = harness()
+    manager.listPanes.mockResolvedValue([pane(), pane({ paneId: "%13", managed: true, taskId: "t1" })] as never)
+    const result = await call("mux_panes")
+    expect(manager.listPanes).toHaveBeenCalledWith({ cwd: project, all: undefined })
+    expect(result.metadata).toMatchObject({ ok: true, panes: expect.any(Array) })
+    expect(result.content[0].text).toContain("npm run dev")
+    expect(result.content[0].text).toContain("手动")
+    expect(result.content[0].text).toContain("受管 task=t1")
+  })
+
+  it("mux_panes 的 all 跨项目", async () => {
+    const { manager, call } = harness()
+    await call("mux_panes", { all: true })
+    expect(manager.listPanes).toHaveBeenCalledWith({ cwd: undefined, all: true })
+  })
+
+  it("mux_adopt 收编手动窗格为受管任务并返回附加命令", async () => {
+    const { manager, call } = harness()
+    const adopted = task({ id: "adopted-1", name: "my-dev", command: "npm run dev" })
+    manager.adoptPane.mockResolvedValue(adopted)
+    const result = await call("mux_adopt", { paneId: "%12", name: "my-dev", cwd: "sub" }, session)
+    expect(manager.adoptPane).toHaveBeenCalledWith({ paneId: "%12", name: "my-dev", cwd: resolve(project, "sub") })
+    expect(manager.attachCommand).toHaveBeenCalledWith(adopted)
+    expect(result.metadata).toMatchObject({ ok: true, id: "adopted-1", attachCommand: cmd })
+  })
+
+  it("mux_restart 的 mode=input 透传给管理器，原地重启不建新窗格", async () => {
+    const { manager, call } = harness()
+    const restarted = task({ paneId: "%1" })
+    manager.restartTask.mockResolvedValue({ ok: true, task: restarted })
+    const result = await call("mux_restart", { id: "build-1", mode: "input", command: "bun run build" }, session)
+    expect(manager.restartTask).toHaveBeenCalledWith("build-1", { command: "bun run build", mode: "input", ...origin })
+    expect(result.metadata).toMatchObject({ ok: true, paneId: "%1" })
   })
 })

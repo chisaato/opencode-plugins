@@ -5,3 +5,4 @@ dist/
 .bun/
 *.tsbuildinfo
 coverage/
+/AGENTS.local.md

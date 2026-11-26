@@ -1,6 +1,6 @@
 import { resolve } from "node:path"
 import type {
-  HistoryCandidate, HistoryOptions, ManagedTask, MuxManager, RunBuildOptions,
+  AdoptPaneOptions, HistoryCandidate, HistoryOptions, ManagedTask, MuxManager, RunBuildOptions,
   ServiceActionOptions, ServiceActionResult, TaskFilter, TaskRole, TaskStatus,
 } from "@misakacloud/opencode-mux-core"
 
@@ -16,12 +16,14 @@ export interface MuxToolDefaults {
 
 type ToolManager = Pick<MuxManager,
   "runBuild" | "serviceAction" | "restartTask" | "removeTask" | "closeSession" | "captureLogs" | "sendInput"
-  | "listTasks" | "pruneGone" | "attachCommand" | "previewHistory" | "cleanHistory">
+  | "listTasks" | "listPanes" | "adoptPane" | "pruneGone" | "attachCommand" | "previewHistory" | "cleanHistory">
 type ToolContext = { sessionID?: string }
 type Selector = { id?: string; name?: string; role?: TaskRole; cwd?: string }
 type BuildInput = Omit<RunBuildOptions, "cwd" | "source" | "sessionId"> & { cwd?: string }
 type ServiceInput = Omit<ServiceActionOptions, "cwd" | "source" | "sessionId"> & { cwd?: string; tailLines?: number }
 type ListInput = { cwd?: string; all?: boolean; role?: TaskRole; status?: TaskStatus; pruneGone?: boolean }
+type PanesInput = { cwd?: string; all?: boolean }
+type AdoptInput = Omit<AdoptPaneOptions, "cwd"> & { cwd?: string }
 type HistoryInput = Omit<HistoryOptions, "cwd"> & { cwd?: string; candidates?: HistoryCandidate[] }
 
 const str = (description: string) => ({ type: "string", description })
@@ -69,6 +71,12 @@ function taskText(task: AttachedTask) {
   const exit = task.exitCode === null ? "" : ` exitCode=${task.exitCode}`
   return `[${task.status}] ${task.role} ${task.name} id=${task.id}${exit}${task.shell ? " shell=驻留" : ""} restartCount=${task.restartCount}`
     + `\n  cwd=${task.cwd} muxSession=${task.muxSession} paneId=${task.paneId}\n  attach: ${task.attachCommand}`
+}
+
+function paneText(pane: { paneId: string; sessionName: string; windowIndex: number; cwd?: string; paneCurrentPath: string; foregroundCommand?: string; paneCurrentCommand: string; managed: boolean; taskId?: string }) {
+  const who = pane.managed ? `受管 task=${pane.taskId ?? ""}` : "手动"
+  return `[${who}] ${pane.sessionName}:${pane.windowIndex} ${pane.paneId} 运行: ${pane.foregroundCommand ?? pane.paneCurrentCommand}`
+    + `\n  cwd=${pane.cwd ?? pane.paneCurrentPath}`
 }
 
 /** 创建 V2 工具；宿主负责按 JSON Schema 校验入参。 */
@@ -162,12 +170,12 @@ export function createMuxTools(manager: ToolManager, projectDirectory: string, d
         })
         return actionReport(`服务 ${action}`, result, tailLines ?? defaults.defaultTailLines ?? 30, action === "remove" && result.ok)
       }),
-    tool<Selector & { command?: string; tailLines?: number }>("mux_restart", "按 ID 或无歧义的名称重启已有构建或服务，可替换命令。",
-      schema({ ...selector, command, tailLines }),
-      async ({ command, tailLines, ...selector }, context) => {
+    tool<Selector & { command?: string; mode?: "respawn" | "input"; tailLines?: number }>("mux_restart", "按 ID 或无歧义的名称重启已有构建或服务，可替换命令。mode=input 时不重建 pane，在当前 shell 发 Ctrl+C 并输入命令原地重启。",
+      schema({ ...selector, command, mode: choices(["respawn", "input"], "重启方式；input 保留当前 shell 的环境和历史，不新建窗格。"), tailLines }),
+      async ({ command, mode, tailLines, ...selector }, context) => {
         const found = await resolveTask(selector)
         if (found.error) return found.error
-        const result = await manager.restartTask(found.task.id, { command, ...origin(context) })
+        const result = await manager.restartTask(found.task.id, { command, mode, ...origin(context) })
         return actionReport("重启任务", result, tailLines ?? defaults.defaultTailLines ?? 30)
       }),
     tool<Selector & { lines?: number }>("mux_logs", "按 ID 或无歧义的名称抓取任务日志。",
@@ -216,6 +224,22 @@ export function createMuxTools(manager: ToolManager, projectDirectory: string, d
           `任务范围：${filter.cwd ?? "所有项目"}；共 ${tasks.length} 个任务${pruneGone ? `，清理 ${pruned.length} 条记录` : ""}。`,
           ...tasks.map(taskText),
         ].join("\n"), { ok: true, cwd: filter.cwd ?? null, total: tasks.length, tasks, pruned: pruned.map(taskSummary) })
+      }),
+    tool<PanesInput>("mux_panes", "列出复用器中实际存在的窗格，含手动创建、未纳入 mux 管理的窗格，并显示每个窗格正在运行的命令。",
+      schema({ cwd, all: bool("未指定 cwd 时，是否查看所有窗格；默认仅当前项目。") }),
+      async ({ cwd, all }) => {
+        const panes = await manager.listPanes({ cwd: cwd === undefined && all ? undefined : workingDirectory(cwd), all })
+        return report([
+          `窗格范围：${cwd === undefined && all ? "所有窗格" : workingDirectory(cwd)}；共 ${panes.length} 个。`,
+          ...panes.map(paneText),
+        ].join("\n"), { ok: true, panes })
+      }),
+    tool<AdoptInput>("mux_adopt", "把一个手动创建的窗格收编为受管任务，让 mux_logs / mux_input / mux_restart 能操作它。用 mux_panes 获取 paneId。",
+      schema({ paneId: str("要收编的窗格 ID，如 %12；须来自 mux_panes。"), name, cwd, role, command }, ["paneId"]),
+      async ({ cwd, ...input }) => {
+        const task = await manager.adoptPane({ ...input, cwd: cwd === undefined ? undefined : workingDirectory(cwd) })
+        const info = await attach(task)
+        return report(`已收编窗格 ${task.paneId} 为任务 ${task.id}。\n${taskText(info)}`, { ...info, ok: true })
       }),
     tool<HistoryInput>("mux_clean_history", "预览或确认清理指定项目的受管任务历史。仅在显式传入预览返回的候选项时才清理；不关闭整个会话。",
       schema({

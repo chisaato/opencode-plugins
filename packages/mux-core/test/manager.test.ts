@@ -120,6 +120,32 @@ describe("mux manager", () => {
     await rm(dir, { recursive: true, force: true })
   })
 
+  it("lists manual panes with session and cwd filters, adopts once, and preserves intended commands on input restart", async () => {
+    fake.panes.set("%900", { fields: {
+      pane_id: "%900", session_name: "manual", pane_pid: "999999999", pane_current_path: identity.cwd,
+      pane_current_command: "sleep", pane_dead: "0",
+    }, output: "" })
+    expect(await manager.listPanes()).toEqual([])
+    expect(await manager.listPanes({ all: true, cwd: identity.cwd })).toHaveLength(1)
+    expect(await manager.listPanes({ all: true, cwd: dir })).toEqual([])
+    const task = await manager.adoptPane({ paneId: "%900", name: "adopted", command: "sleep 60" })
+    expect(task).toMatchObject({ paneId: "%900", name: "adopted", command: "sleep 60", status: "running" })
+    expect(await manager.adoptPane({ paneId: "%900" })).toEqual(task)
+    expect(await manager.listTasks({ name: "adopted" })).toHaveLength(1)
+    const calls = fake.calls.length
+    expect(await manager.restartTask(task.id, { mode: "input", command: "echo restarted" })).toMatchObject({
+      ok: true, task: { command: "sleep 60", paneId: "%900", restartCount: 0 },
+    })
+    expect(fake.calls.slice(calls).filter((call) => call.includes("send-keys")).map((call) => call.slice(1))).toEqual([
+      ["send-keys", "-t", "%900", "C-c"],
+      ["send-keys", "-t", "%900", "-l", "--", "echo restarted"],
+      ["send-keys", "-t", "%900", "Enter"],
+    ])
+    expect(fake.calls.slice(calls).some((call) => call.includes("respawn-pane") || call.includes("new-window"))).toBe(false)
+    await expect(manager.restartTask(task.id, { mode: "input" })).rejects.toMatchObject({ code: "TASK_NO_LIVE_PANE" })
+    await expect(manager.adoptPane({ paneId: "%missing" })).rejects.toMatchObject({ code: "TASK_NO_LIVE_PANE" })
+  })
+
   async function writeExitMarker(task: { id: string; paneId: string; panePid?: number }) {
     const prefix = await createMuxState().prepareExitFile(task.paneId, task.id)
     const marker = `${prefix}${task.panePid}.txt`
@@ -409,6 +435,23 @@ describe("backend and state helpers", () => {
     expect(resolveMuxStateDir({ OPENCODE_MUX_STATE_DIR: "custom", XDG_STATE_HOME: "xdg" }, "home")).toBe("custom")
     expect(resolveMuxStateDir({ XDG_STATE_HOME: "xdg" }, "home")).toBe(join("xdg", "opencode-mux"))
     expect(resolveMuxStateDir({}, "home")).toBe(join("home", ".local", "state", "opencode-mux"))
+  })
+
+  it("驻留 shell 会把执行的命令注入自身历史，支持按 Up 调出", () => {
+    const backend = { kind: "tmux", platform: "linux" } as const
+    const script = wrapShellCommand(backend, "echo hello-world", undefined, "/tmp/oc-exit-")[2]
+    // 命令原文通过环境变量传给交互 shell，避免引号/换行转义问题。
+    expect(script).toContain("__oc_hist_cmd='echo hello-world'")
+    // zsh / bash 分别用自身历史 API 注入，不直接改写 HISTFILE。
+    expect(script).toContain(`print -s -- "$__OC_HIST_CMD"`)
+    expect(script).toContain(`history -s -- "$__OC_HIST_CMD"`)
+    expect(script).toContain("precmd_functions+=(__oc_mux_inject_history)")
+    expect(script).toContain("PROMPT_COMMAND+=(__oc_mux_inject_history)")
+    // 注入只发生一次：hook 运行时把自己从 precmd/PROMPT_COMMAND 移除。
+    expect(script).toContain("precmd_functions=(${precmd_functions:#__oc_mux_inject_history})")
+    expect(script).toContain("unset -f __oc_mux_inject_history")
+    // 临时 rc 目录会在首个 prompt 时被清理，不残留。
+    expect(script).toContain("rm -rf \"$__OC_HIST_DIR\"")
   })
 
   it("propagates external cancellation to a waiting mux client", async () => {

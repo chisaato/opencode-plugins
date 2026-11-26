@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { muxCommandArgs, stripAnsi, supportsPosixMuxFeatures, wrapShellCommand } from "./backend"
 import { assertTmuxConfigTarget, validateTmuxBackendConfig } from "./config"
+import { readForegroundCommand } from "./process"
 import type { CommandOptions, CommandResult, CommandRunner, LivePaneInfo, ManagedPaneOptions, MuxBackend, StatusTheme } from "./types"
 
 const OPTIONS = {
@@ -21,6 +22,7 @@ const cleanupHook = 'if-shell -F "#{pane_dead}" "kill-pane"'
 const byobuTable = "mux-byobu"
 // 使用数字下标，兼容 tmux 3.4 等不支持具名 hook 下标的版本。
 const themeHook = "after-new-window[100]"
+const sessionCreatedHook = "session-created[100]"
 const mouseKey = /^(?:[CMS]-)*(?:Mouse|Wheel|DoubleClick|TripleClick)\S*$/
 const keyBinding = /^(bind-key\s+(?:-r\s+)?-T\s+)(\S+)(\s+(\S+)\s+\S.*)$/
 
@@ -173,7 +175,9 @@ export function createMuxClient(backend: MuxBackend, runner: CommandRunner, opti
     const result = await run(["list-panes", "-a", "-F", paneFormat])
     if (noServer(result)) return []
     if (result.exitCode !== 0) throw new MuxCommandError("list-panes", result)
-    return parsePanes(result.stdout)
+    const panes = parsePanes(result.stdout)
+    for (const pane of panes) pane.foregroundCommand = readForegroundCommand(pane.panePid)
+    return panes
   }
 
   async function setMetadata(paneId: string, task: ManagedPaneOptions): Promise<void> {
@@ -233,6 +237,8 @@ export function createMuxClient(backend: MuxBackend, runner: CommandRunner, opti
     await checked(commandList([
       ...bindings.map((binding) => ["bind-key", "-T", byobuTable, ...binding]),
       ["set-option", "-t", session, "key-table", byobuTable],
+      ["set-option", "-w", "-t", session, "@opencode_mux_byobu", "1"],
+      ["set-hook", "-g", sessionCreatedHook, "if-shell -F '#{W:#{@opencode_mux_byobu}}' 'set-option key-table mux-byobu'"],
     ]))
   }
 
@@ -343,7 +349,7 @@ export function createMuxClient(backend: MuxBackend, runner: CommandRunner, opti
     }
   }
 
-  return { listPanes, createManagedPane, respawnPane, sendInterrupt, sendKeys, capturePane, killPane, killSession, waitForChannel }
+  return { listPanes, setPaneMetadata: setMetadata, createManagedPane, respawnPane, sendInterrupt, sendKeys, capturePane, killPane, killSession, waitForChannel }
 }
 
 export type MuxClient = ReturnType<typeof createMuxClient>
